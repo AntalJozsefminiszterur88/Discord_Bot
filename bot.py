@@ -15,7 +15,7 @@ MIN_TIME = 1800  # Minimum 30 perc
 MAX_TIME = 7200  # Maximum 2 óra
 # -------------------
 INTERNAL_API_PORT = 5050  # Port az internal API-hoz (Docker konténeren belül)
-TARGET_CHANNEL_ID: Optional[int] = None  # Állítsd be a Discord csatorna ID-t
+TARGET_CHANNEL_ID: Optional[int] = 1370685414578327594
 
 load_dotenv()
 TOKEN = os.getenv('DISCORD_TOKEN')
@@ -404,4 +404,5 @@ async def titkosteszt(ctx):
         await ctx.send(f"❌ Hiba történt a teszt közben: {e}")
 
 bot.run(TOKEN)
+
 
