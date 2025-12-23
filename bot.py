@@ -127,12 +127,7 @@ async def handle_share_video(request):
 
     try:
         print(f"[INTERNAL API] Új videó érkezett: {title} ({url}) feltöltő: {uploader}")
-        message = (
-            f"📹 Új videó érkezett: **{title}**\n"
-            f"Feltöltő: {uploader}\n"
-            f"Link: {url}"
-        )
-        await channel.send(message)
+        await channel.send(video_url)
         return web.Response(status=200, text='Video shared successfully')
     except Exception as e:
         return web.Response(status=500, text=f'Failed to send message: {e}')
@@ -404,5 +399,6 @@ async def titkosteszt(ctx):
         await ctx.send(f"❌ Hiba történt a teszt közben: {e}")
 
 bot.run(TOKEN)
+
 
 
