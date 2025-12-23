@@ -7,11 +7,14 @@ import random
 from dotenv import load_dotenv
 import spotipy
 from spotipy.oauth2 import SpotifyClientCredentials
+from aiohttp import web
 
 # --- BEÁLLÍTÁSOK ---
 MIN_TIME = 1800  # Minimum 30 perc
 MAX_TIME = 7200  # Maximum 2 óra
 # -------------------
+INTERNAL_API_PORT = 5050
+TARGET_CHANNEL_ID = None  # Állítsd be a Discord csatorna ID-t
 
 load_dotenv()
 TOKEN = os.getenv('DISCORD_TOKEN')
@@ -99,6 +102,50 @@ def find_local_music(query):
             
     return None
 
+# --- BELSŐ API ---
+async def handle_share_video(request):
+    try:
+        data = await request.json()
+    except Exception:
+        return web.Response(status=400, text='Invalid JSON payload')
+
+    url = data.get('url')
+    title = data.get('title')
+    uploader = data.get('uploader')
+
+    if not all([url, title, uploader]):
+        return web.Response(status=400, text='Missing url/title/uploader fields')
+
+    if TARGET_CHANNEL_ID is None:
+        return web.Response(status=500, text='TARGET_CHANNEL_ID is not configured')
+
+    channel = bot.get_channel(TARGET_CHANNEL_ID)
+    if channel is None:
+        return web.Response(status=500, text='Target channel not found')
+
+    try:
+        message = (
+            f"📹 Új videó érkezett: **{title}**\n"
+            f"Feltöltő: {uploader}\n"
+            f"Link: {url}"
+        )
+        await channel.send(message)
+        return web.Response(status=200, text='Video shared successfully')
+    except Exception as e:
+        return web.Response(status=500, text=f'Failed to send message: {e}')
+
+
+async def start_internal_server():
+    app = web.Application()
+    app.add_routes([web.post('/share-video', handle_share_video)])
+
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', INTERNAL_API_PORT)
+    await site.start()
+    bot.internal_api_runner = runner
+    print(f"Internal API running on 0.0.0.0:{INTERNAL_API_PORT}")
+
 # --- AUTOMATA IJESZTGETŐS LOOP ---
 async def prank_loop():
     await bot.wait_until_ready()
@@ -173,7 +220,12 @@ def check_queue(ctx):
 @bot.event
 async def on_ready():
     print(f'Bejelentkezve mint: {bot.user.name}')
-    bot.loop.create_task(prank_loop())
+    if not getattr(bot, 'prank_task_started', False):
+        bot.loop.create_task(prank_loop())
+        bot.prank_task_started = True
+    if not getattr(bot, 'internal_server_started', False):
+        bot.loop.create_task(start_internal_server())
+        bot.internal_server_started = True
 
 @bot.command(name='join')
 async def join(ctx):
