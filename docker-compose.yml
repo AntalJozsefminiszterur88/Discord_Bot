@@ -8,7 +8,8 @@ services:
     env_file:
       - .env
     volumes:
-     - ./sounds:/app/sounds  
-     - ./music:/app/music 
+      - ./sounds:/app/sounds
+      - ./music:/app/music
+      - ./cookies.txt:/app/cookies.txt
 
     
