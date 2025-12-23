@@ -4,6 +4,7 @@ import yt_dlp
 import asyncio
 import os
 import random
+from typing import Optional
 from dotenv import load_dotenv
 import spotipy
 from spotipy.oauth2 import SpotifyClientCredentials
@@ -13,8 +14,8 @@ from aiohttp import web
 MIN_TIME = 1800  # Minimum 30 perc
 MAX_TIME = 7200  # Maximum 2 óra
 # -------------------
-INTERNAL_API_PORT = 5050
-TARGET_CHANNEL_ID = None  # Állítsd be a Discord csatorna ID-t
+INTERNAL_API_PORT = 5050  # Port az internal API-hoz (Docker konténeren belül)
+TARGET_CHANNEL_ID: Optional[int] = None  # Állítsd be a Discord csatorna ID-t
 
 load_dotenv()
 TOKEN = os.getenv('DISCORD_TOKEN')
@@ -104,6 +105,7 @@ def find_local_music(query):
 
 # --- BELSŐ API ---
 async def handle_share_video(request):
+    """Fogad egy videó megosztási kérést a webes backendtől."""
     try:
         data = await request.json()
     except Exception:
@@ -124,6 +126,7 @@ async def handle_share_video(request):
         return web.Response(status=500, text='Target channel not found')
 
     try:
+        print(f"[INTERNAL API] Új videó érkezett: {title} ({url}) feltöltő: {uploader}")
         message = (
             f"📹 Új videó érkezett: **{title}**\n"
             f"Feltöltő: {uploader}\n"
@@ -136,6 +139,8 @@ async def handle_share_video(request):
 
 
 async def start_internal_server():
+    """Elindítja a belső HTTP API szervert a Docker konténeren belül."""
+    await bot.wait_until_ready()
     app = web.Application()
     app.add_routes([web.post('/share-video', handle_share_video)])
 
