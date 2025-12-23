@@ -127,7 +127,7 @@ async def handle_share_video(request):
 
     try:
         print(f"[INTERNAL API] Új videó érkezett: {title} ({url}) feltöltő: {uploader}")
-        await channel.send(video_url)
+        await channel.send(url)
         return web.Response(status=200, text='Video shared successfully')
     except Exception as e:
         return web.Response(status=500, text=f'Failed to send message: {e}')
