@@ -1,12 +1,14 @@
-import discord
-from discord.ext import commands
-import yt_dlp
 import asyncio
 import os
 import random
 from typing import Optional
-from dotenv import load_dotenv
+
+import discord
 import spotipy
+import yt_dlp
+from discord.ext import commands
+from dotenv import load_dotenv
+from gtts import gTTS
 from spotipy.oauth2 import SpotifyClientCredentials
 from aiohttp import web
 
@@ -31,7 +33,7 @@ bot = commands.Bot(command_prefix='!', intents=intents)
 
 song_queues = {}
 titles_queues = {}
-disconnect_timers = {}
+afk_tasks = {}
 
 # YT-DLP beállítások
 ytdl_format_options = {
@@ -195,28 +197,14 @@ async def prank_loop():
 
 # --- ZENELŐ RÉSZ ---
 
-async def disconnect_timer(ctx):
-    await asyncio.sleep(300)
-    guild_id = ctx.guild.id
-    if ctx.voice_client and ctx.voice_client.is_connected() and not ctx.voice_client.is_playing():
-        await ctx.voice_client.disconnect()
-        if guild_id in song_queues: del song_queues[guild_id]
-        if guild_id in titles_queues: del titles_queues[guild_id]
-        await ctx.send("Leléptem csicskák!")
-
 def check_queue(ctx):
     guild_id = ctx.guild.id
     if guild_id in song_queues and len(song_queues[guild_id]) > 0:
-        if guild_id in disconnect_timers:
-            disconnect_timers[guild_id].cancel()
-            del disconnect_timers[guild_id]
         voice = ctx.guild.voice_client
         source = song_queues[guild_id].pop(0)
         titles_queues[guild_id].pop(0)
         voice.play(source, after=lambda e: check_queue(ctx))
         asyncio.run_coroutine_threadsafe(ctx.send(f'▶️ Következő zene: **{source.title}**'), bot.loop)
-    else:
-        disconnect_timers[guild_id] = bot.loop.create_task(disconnect_timer(ctx))
 
 @bot.event
 async def on_ready():
@@ -228,6 +216,54 @@ async def on_ready():
         bot.loop.create_task(start_internal_server())
         bot.internal_server_started = True
 
+
+@bot.event
+async def on_voice_state_update(member, before, after):
+    voice_client = member.guild.voice_client
+    if not voice_client or not voice_client.channel:
+        return
+
+    bot_channel = voice_client.channel
+    guild_id = member.guild.id
+
+    if after.channel == bot_channel and before.channel != bot_channel:
+        if guild_id in afk_tasks:
+            afk_tasks[guild_id].cancel()
+            del afk_tasks[guild_id]
+        return
+
+    if before.channel != bot_channel or after.channel == bot_channel:
+        return
+
+    if guild_id in afk_tasks:
+        afk_tasks[guild_id].cancel()
+
+    if not bot.user:
+        return
+
+    if any(member != bot.user for member in bot_channel.members):
+        return
+
+    async def disconnect_if_empty(channel):
+        try:
+            await asyncio.sleep(60)
+            vc = member.guild.voice_client
+            if not vc or vc.channel != channel:
+                return
+            if not bot.user:
+                return
+            members_without_bot = [m for m in channel.members if m != bot.user]
+            if not members_without_bot:
+                if guild_id in song_queues:
+                    del song_queues[guild_id]
+                if guild_id in titles_queues:
+                    del titles_queues[guild_id]
+                await vc.disconnect()
+        finally:
+            afk_tasks.pop(guild_id, None)
+
+    afk_tasks[guild_id] = bot.loop.create_task(disconnect_if_empty(bot_channel))
+
 @bot.command(name='join')
 async def join(ctx):
     if not ctx.message.author.voice:
@@ -238,6 +274,39 @@ async def join(ctx):
         await channel.connect()
     else:
         await ctx.voice_client.move_to(channel)
+
+
+@bot.command(name='mondd')
+async def mondd(ctx, *, text: str):
+    if not ctx.message.author.voice:
+        await ctx.send("Nem vagy bent egy hangcsatornában sem!")
+        return
+
+    voice_client = ctx.voice_client
+    channel = ctx.message.author.voice.channel
+
+    if voice_client and (voice_client.is_playing() or voice_client.is_paused()):
+        await ctx.send("Várd meg, míg a jelenlegi lejátszás véget ér!")
+        return
+
+    if not voice_client:
+        voice_client = await channel.connect()
+    else:
+        await voice_client.move_to(channel)
+
+    tts_file = 'tts_temp.mp3'
+    try:
+        tts = gTTS(text=text, lang='hu')
+        tts.save(tts_file)
+
+        source = discord.FFmpegPCMAudio(tts_file)
+        voice_client.play(source)
+
+        while voice_client.is_playing():
+            await asyncio.sleep(1)
+    finally:
+        if os.path.exists(tts_file):
+            os.remove(tts_file)
 
 # --- MÓDOSÍTOTT PLAY PARANCS ---
 @bot.command(name='play')
@@ -297,11 +366,43 @@ async def play(ctx, *, url):
             titles_queues[guild_id].append(player.title)
             await ctx.send(f'✅ Sorba állítva: **{player.title}**')
         else:
-            if guild_id in disconnect_timers:
-                disconnect_timers[guild_id].cancel()
-                del disconnect_timers[guild_id]
             voice_channel.play(player, after=lambda e: check_queue(ctx))
             await ctx.send(f'Most szól: **{player.title}**')
+
+
+@bot.command(name='rulett')
+@commands.has_permissions(administrator=True)
+async def rulett(ctx):
+    if not ctx.message.author.voice:
+        await ctx.send("Nem vagy bent egy hangcsatornában sem!")
+        return
+
+    voice_client = ctx.voice_client
+
+    if not voice_client or not voice_client.channel:
+        await ctx.send("Nem vagyok hangcsatornában.")
+        return
+
+    if ctx.message.author.voice.channel != voice_client.channel:
+        await ctx.send("Csak abban a csatornában használhatod, ahol én is vagyok!")
+        return
+
+    await ctx.send("Bang! 🔫")
+
+    for member in list(voice_client.channel.members):
+        if member == ctx.guild.me:
+            continue
+        if random.randint(1, 6) == 1:
+            try:
+                await member.move_to(None)
+            except discord.Forbidden:
+                await ctx.send(f"Nem tudom kirúgni: {member.display_name}")
+
+
+@rulett.error
+async def rulett_error(ctx, error):
+    if isinstance(error, commands.MissingPermissions):
+        await ctx.send("Ehhez a parancshoz admin jogosultság kell!")
 
 # --- ÚJ PARANCS: SAJÁT ZENÉK LISTÁZÁSA ---
 @bot.command(name='sajat-zenek')
@@ -353,6 +454,9 @@ async def leave(ctx):
     voice_client = ctx.voice_client
     if voice_client:
         guild_id = ctx.guild.id
+        if guild_id in afk_tasks:
+            afk_tasks[guild_id].cancel()
+            del afk_tasks[guild_id]
         if guild_id in song_queues: del song_queues[guild_id]
         if guild_id in titles_queues: del titles_queues[guild_id]
         await voice_client.disconnect()
