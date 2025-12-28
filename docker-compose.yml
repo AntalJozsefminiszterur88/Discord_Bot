@@ -12,5 +12,6 @@ services:
       - ./music:/app/music
       - ./jimmy:/app/jimmy
       - ./cookies.txt:/app/cookies.txt
+      - ./quotes:/app/quotes
 
     
