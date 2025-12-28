@@ -183,6 +183,8 @@ class RouletteGame:
         self.players = []
         self.current_player_index = 0
         self.turn_task = None
+        self.turn_message = None
+        self.turn_deadline = None
 
     async def start(self, ctx, mode: int, stake: str, voice_client, mixer) -> bool:
         members = [member for member in voice_client.channel.members if not member.bot]
@@ -201,7 +203,13 @@ class RouletteGame:
         self.voice_client = voice_client
         self.mixer = mixer
         await ctx.send(
-            f"Játék indul! Kezdő játékos: {self._current_player().display_name}"
+            embed=discord.Embed(
+                title="🎲 Russian Roulette V2",
+                description=(
+                    f"Játék indul! Kezdő játékos: **{self._current_player().display_name}**"
+                ),
+                color=discord.Color.red(),
+            )
         )
         await self._announce_turn(ctx)
         return True
@@ -212,6 +220,8 @@ class RouletteGame:
             self.mixer.set_main_source(None)
         await self._cancel_turn_timer()
         self.players = []
+        self.turn_message = None
+        self.turn_deadline = None
 
     def _roll_hit(self) -> bool:
         if self.mode == 1:
@@ -235,27 +245,51 @@ class RouletteGame:
                 pass
         self.turn_task = None
 
+    def _build_turn_embed(self, player: discord.Member, description: str) -> discord.Embed:
+        embed = discord.Embed(
+            title="🎯 Russian Roulette V2",
+            description=description,
+            color=discord.Color.dark_red(),
+        )
+        embed.set_footer(text=f"Következő játékos: {player.display_name}")
+        return embed
+
+    async def _update_turn_message(
+        self,
+        ctx,
+        player: discord.Member,
+        description: str,
+        *,
+        force_new: bool = False,
+    ) -> None:
+        embed = self._build_turn_embed(player, description)
+        if self.turn_message and not force_new:
+            try:
+                await self.turn_message.edit(embed=embed)
+                return
+            except discord.NotFound:
+                self.turn_message = None
+        self.turn_message = await ctx.send(embed=embed)
+
     async def _announce_turn(self, ctx) -> None:
         current_player = self._current_player()
         if not current_player:
             return
-        await ctx.send(f"Következő játékos: {current_player.display_name} (60mp)")
+        self.turn_deadline = int(time.time()) + 60
+        description = (
+            f"**{current_player.display_name}** következik.\n"
+            f"⏰ Idő lejár: <t:{self.turn_deadline}:R>\n"
+            "Írd be: **!énjövök**"
+        )
+        await self._update_turn_message(
+            ctx, current_player, description, force_new=True
+        )
         await self._cancel_turn_timer()
         self.turn_task = asyncio.create_task(self._turn_timeout(ctx, current_player.id))
 
     async def _turn_timeout(self, ctx, player_id: int) -> None:
         try:
-            await asyncio.sleep(30)
-            current_player = self._current_player()
-            if not current_player or current_player.id != player_id:
-                return
-            await ctx.send(f"⏳ {current_player.display_name}: 30mp maradt!")
-            await asyncio.sleep(20)
-            current_player = self._current_player()
-            if not current_player or current_player.id != player_id:
-                return
-            await ctx.send(f"⏳ {current_player.display_name}: 10mp maradt!")
-            await asyncio.sleep(10)
+            await asyncio.sleep(60)
         except asyncio.CancelledError:
             return
 
@@ -265,9 +299,17 @@ class RouletteGame:
             current_player = self._current_player()
             if not current_player or current_player.id != player_id:
                 return
-            await ctx.send(f"⌛ {current_player.display_name} kifutott az időből!")
+            await self._update_turn_message(
+                ctx,
+                current_player,
+                f"⌛ **{current_player.display_name}** kifutott az időből!",
+            )
             await punish_player(ctx, current_player, self.stake)
-            await ctx.send(f"💀 {current_player.display_name} kiesett!")
+            await self._update_turn_message(
+                ctx,
+                current_player,
+                f"💀 **{current_player.display_name}** kiesett!",
+            )
             await self._advance_turn(ctx, eliminated=True)
 
     async def _advance_turn(self, ctx, eliminated: bool) -> None:
@@ -287,7 +329,13 @@ class RouletteGame:
 
         if len(self.players) == 1:
             winner = self.players[0]
-            await ctx.send(f"🏆 {winner.display_name} nyerte a játékot!")
+            await ctx.send(
+                embed=discord.Embed(
+                    title="🏆 Russian Roulette V2",
+                    description=f"**{winner.display_name}** nyerte a játékot!",
+                    color=discord.Color.green(),
+                )
+            )
             await self.stop()
             return
         if not self.players:
@@ -329,13 +377,20 @@ class RouletteGame:
             if hit:
                 bang = discord.FFmpegPCMAudio("/app/roulette_sounds/bang.mp3", options="-vn")
                 self.mixer.add_sfx(bang)
+                await asyncio.sleep(1.5)
                 await punish_player(ctx, member, self.stake)
-                await ctx.send(f"💥 {member.display_name} megkapta a lövést!")
+                await self._update_turn_message(
+                    ctx, member, f"💥 **{member.display_name}** megkapta a lövést!"
+                )
                 await self._advance_turn(ctx, eliminated=True)
             else:
                 click = discord.FFmpegPCMAudio("/app/roulette_sounds/click.mp3", options="-vn")
                 self.mixer.add_sfx(click)
-                await ctx.send(f"😅 {member.display_name} túlélte ezt a kört!")
+                await self._update_turn_message(
+                    ctx,
+                    member,
+                    f"✅ **{member.display_name}** túlélte ezt a kört!",
+                )
                 await self._advance_turn(ctx, eliminated=False)
 
 
@@ -903,34 +958,32 @@ async def rulett2(ctx):
         await ctx.send("Már fut egy rulett játék ebben a szerverben!")
         return
 
-    await ctx.send("Mód választás: 1 = pörgés minden körben, 2 = egyszeri pörgés")
-
     def mode_check(message):
         return message.author == ctx.author and message.channel == ctx.channel
 
-    try:
-        mode_msg = await bot.wait_for("message", check=mode_check, timeout=60)
-    except asyncio.TimeoutError:
-        await ctx.send("⏱️ Nem érkezett válasz időben.")
-        return
-
-    mode_value = mode_msg.content.strip()
-    if mode_value not in {"1", "2"}:
+    await ctx.send("Mód választás: 1 = pörgés minden körben, 2 = egyszeri pörgés")
+    while True:
+        try:
+            mode_msg = await bot.wait_for("message", check=mode_check, timeout=60)
+        except asyncio.TimeoutError:
+            await ctx.send("⏱️ Nem érkezett válasz időben.")
+            return
+        mode_value = mode_msg.content.strip()
+        if mode_value in {"1", "2"}:
+            break
         await ctx.send("❌ Érvénytelen mód. Használd: 1 vagy 2.")
-        return
 
     await ctx.send("Tét választás: kick / disconnect")
-
-    try:
-        stake_msg = await bot.wait_for("message", check=mode_check, timeout=60)
-    except asyncio.TimeoutError:
-        await ctx.send("⏱️ Nem érkezett válasz időben.")
-        return
-
-    stake_value = stake_msg.content.strip().lower()
-    if stake_value not in {"kick", "disconnect"}:
+    while True:
+        try:
+            stake_msg = await bot.wait_for("message", check=mode_check, timeout=60)
+        except asyncio.TimeoutError:
+            await ctx.send("⏱️ Nem érkezett válasz időben.")
+            return
+        stake_value = stake_msg.content.strip().lower()
+        if stake_value in {"kick", "disconnect"}:
+            break
         await ctx.send("❌ Érvénytelen tét. Használd: kick vagy disconnect.")
-        return
 
     mixer = get_mixer(voice_client)
     mixer.set_main_source(build_intro_source())
@@ -941,7 +994,13 @@ async def rulett2(ctx):
         return
     roulette_games[ctx.guild.id] = game
 
-    await ctx.send("🎲 Rulett V2 indul! Írd be: **!énjövök** hogy lőj egyet.")
+    await ctx.send(
+        embed=discord.Embed(
+            title="🎲 Russian Roulette V2",
+            description="Írd be: **!énjövök** hogy lőj egyet.",
+            color=discord.Color.red(),
+        )
+    )
 
 
 @bot.command(name="énjövök")
