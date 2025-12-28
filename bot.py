@@ -38,6 +38,7 @@ sp = spotipy.Spotify(auth_manager=SpotifyClientCredentials(client_id=SPOTIPY_CLI
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix='!', intents=intents)
+bot.remove_command('help')
 
 song_queues = {}
 titles_queues = {}
@@ -366,6 +367,48 @@ async def on_voice_state_update(member, before, after):
             afk_tasks.pop(guild_id, None)
 
     afk_tasks[guild_id] = bot.loop.create_task(disconnect_if_empty(bot_channel))
+
+@bot.command(name='help')
+async def help_command(ctx):
+    embed = discord.Embed(
+        title="A Király Parancsai",
+        description="Itt láthatod, hogyan tudsz irányítani.",
+        color=discord.Color.gold(),
+    )
+    embed.add_field(
+        name="🎵 Zene (Music)",
+        value=(
+            "**!play <url/cím>**: Lejátszás YouTube-ról, Spotify-ról vagy helyi fájlból.\n"
+            "**!skip**: Jelenlegi zene átugrása.\n"
+            "**!pause** / **!resume**: Szünet / Folytatás.\n"
+            "**!queue**: Lejátszási lista megtekintése.\n"
+            "**!sajat-zenek**: A 'music' mappában lévő fájlok listázása.\n"
+            "**!join** / **!leave**: Belépés és kilépés."
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="👻 Szórakozás (Fun)",
+        value=(
+            "**!mondd <szöveg>**: Felolvassa a szöveget (TTS).\n"
+            "**!rulett**: Orosz rulett (Vigyázz, kidobhat!).\n"
+            "**!titkosteszt**: Egy random hang azonnali bejátszása (sima)."
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="👑 Admin / Jimmy Mód (Admin Only)",
+        value=(
+            "**!Jimmy mód**: Csak Jimmy zenék bejátszása random időközönként.\n"
+            "**!Normál mód**: Csak sima ijesztések bejátszása.\n"
+            "**!Vegyes mód**: Jimmy és sima hangok vegyesen.\n"
+            "**!Random-bejátszás <on/off>**: Az automata bejátszás ki/bekapcsolása.\n"
+            "**!Jimmyteszt**: Egy random Jimmy hang azonnali bejátszása.\n"
+            "**!mondas_teszt**: A nap mondása tesztelése (azonnali küldés)."
+        ),
+        inline=False,
+    )
+    await ctx.send(embed=embed)
 
 @bot.command(name='join')
 async def join(ctx):
