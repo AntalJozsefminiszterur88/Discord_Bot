@@ -235,6 +235,26 @@ class RouletteGame:
         self.turn_deadline = None
         self.messages_to_cleanup = []
 
+    async def _shutdown_voice(self) -> None:
+        if not self.voice_client:
+            return
+        guild_id = self.voice_client.guild.id
+        if guild_id in afktasks:
+            afktasks[guild_id].cancel()
+            del afktasks[guild_id]
+        song_queues.pop(guild_id, None)
+        titles_queues.pop(guild_id, None)
+        mixers.pop(guild_id, None)
+        roulette_games.pop(guild_id, None)
+        if self.voice_client.is_playing() or self.voice_client.is_paused():
+            self.voice_client.stop()
+        await self.voice_client.disconnect()
+
+    async def end_game(self, ctx, result_message: discord.Message) -> None:
+        await self._cleanup_messages(ctx, exclude_message_id=result_message.id)
+        await self.stop()
+        await self._shutdown_voice()
+
     def _roll_hit(self) -> bool:
         if self.mode == 1:
             return random.randint(1, 6) == 1
@@ -349,13 +369,11 @@ class RouletteGame:
                     color=discord.Color.green(),
                 )
             )
-            await self._cleanup_messages(ctx, exclude_message_id=result_message.id)
-            await self.stop()
+            await self.end_game(ctx, result_message)
             return
         if not self.players:
             result_message = await ctx.send("A játék véget ért, nincs több játékos.")
-            await self._cleanup_messages(ctx, exclude_message_id=result_message.id)
-            await self.stop()
+            await self.end_game(ctx, result_message)
             return
 
         await self._announce_turn(ctx)
