@@ -833,7 +833,8 @@ async def help_command(ctx):
             "**!pause** / **!resume**: Szünet / Folytatás.\n"
             "**!queue**: Lejátszási lista megtekintése.\n"
             "**!sajat-zenek**: A 'music' mappában lévő fájlok listázása.\n"
-            "**!join** / **!leave**: Belépés és kilépés."
+            "**!join** / **!leave**: Belépés és kilépés.\n"
+            "**!lábhoz**: Minden folyamat leállítása és leválasztás."
         ),
         inline=False,
     )
@@ -1015,7 +1016,7 @@ async def rulett2(ctx):
 
     game = roulette_games.get(ctx.guild.id)
     if game and game.active:
-        await ctx.send("Már fut egy rulett játék ebben a szerverben!")
+        await ctx.send("Már fut egy játék!")
         return
     game = RouletteGame(ctx.guild.id)
     game.track_message(ctx.message)
@@ -1032,8 +1033,12 @@ async def rulett2(ctx):
         except asyncio.TimeoutError:
             await game.send_and_track(ctx, "⏱️ Nem érkezett válasz időben.")
             return
+        mode_content = mode_msg.content.strip()
+        if mode_content.startswith("!") or mode_content.lower() == "mégse":
+            await game.send_and_track(ctx, "❌ Beállítás megszakítva.")
+            return
         game.track_message(mode_msg)
-        mode_value = mode_msg.content.strip()
+        mode_value = mode_content
         if mode_value in {"1", "2"}:
             break
         await game.send_and_track(ctx, "❌ Érvénytelen mód. Használd: 1 vagy 2.")
@@ -1045,8 +1050,12 @@ async def rulett2(ctx):
         except asyncio.TimeoutError:
             await game.send_and_track(ctx, "⏱️ Nem érkezett válasz időben.")
             return
+        stake_content = stake_msg.content.strip()
+        if stake_content.startswith("!") or stake_content.lower() == "mégse":
+            await game.send_and_track(ctx, "❌ Beállítás megszakítva.")
+            return
         game.track_message(stake_msg)
-        stake_value = stake_msg.content.strip().lower()
+        stake_value = stake_content.lower()
         if stake_value in {"kick", "disconnect"}:
             break
         await game.send_and_track(ctx, "❌ Érvénytelen tét. Használd: kick vagy disconnect.")
@@ -1228,6 +1237,27 @@ async def leave(ctx):
         roulette_games.pop(guild_id, None)
         await voice_client.disconnect()
         await ctx.send("👋 Most már ez vagyok én, egy süllyedő hajó.")
+
+
+@bot.command(name="lábhoz")
+async def labhoz(ctx):
+    guild_id = ctx.guild.id
+    game = roulette_games.get(guild_id)
+    if game and game.active:
+        await game.stop()
+    if guild_id in afktasks:
+        afktasks[guild_id].cancel()
+        del afktasks[guild_id]
+    song_queues.pop(guild_id, None)
+    titles_queues.pop(guild_id, None)
+    mixers.pop(guild_id, None)
+    roulette_games.pop(guild_id, None)
+    voice_client = ctx.voice_client
+    if voice_client:
+        if voice_client.is_playing() or voice_client.is_paused():
+            voice_client.stop()
+        await voice_client.disconnect()
+    await ctx.send("🐕 Igenis, gazdám! (Minden folyamat leállítva, memória törölve).")
 
 
 @bot.command(name="titkosteszt")
