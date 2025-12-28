@@ -1,16 +1,19 @@
 import asyncio
+import datetime
 import os
 import random
+import time
 from typing import Optional
 
 import discord
 import spotipy
 import yt_dlp
-from discord.ext import commands
+from discord.ext import commands, tasks
 from dotenv import load_dotenv
 from gtts import gTTS
 from spotipy.oauth2 import SpotifyClientCredentials
 from aiohttp import web
+import re
 
 # --- BEÁLLÍTÁSOK ---
 MIN_TIME = 1800  # Minimum 30 perc
@@ -18,6 +21,7 @@ MAX_TIME = 7200  # Maximum 2 óra
 # -------------------
 INTERNAL_API_PORT = 5050  # Port az internal API-hoz (Docker konténeren belül)
 TARGET_CHANNEL_ID: Optional[int] = 1370685414578327594
+QUOTES_CHANNEL_ID = 416599669355970560
 
 # --- PRANK ÁLLAPOT ---
 prank_enabled = True
@@ -104,6 +108,81 @@ def find_local_music(query):
             return f
             
     return None
+
+# --- MONDÁSOK ---
+QUOTES_FILE_PATH = "/app/quotes/mondasok.txt"
+QUOTE_TIMESTAMP_REGEX = re.compile(r"^\[\d{2}\.\d{2}\.\d{4} \d{2}:\d{2}\]")
+
+
+def is_timestamp_line(line: str) -> bool:
+    return bool(QUOTE_TIMESTAMP_REGEX.match(line))
+
+
+def load_quotes() -> list[str]:
+    if not os.path.exists(QUOTES_FILE_PATH):
+        print(f"Quotes file not found: {QUOTES_FILE_PATH}")
+        return []
+
+    quotes = []
+    expecting_quote = False
+    with open(QUOTES_FILE_PATH, "r", encoding="utf-8") as quote_file:
+        for raw_line in quote_file:
+            line = raw_line.strip()
+            if is_timestamp_line(line):
+                expecting_quote = True
+                continue
+            if not expecting_quote:
+                continue
+            if not line or line in {"{Attachments}", "{Reactions}"}:
+                continue
+            if line.lower().startswith("http"):
+                continue
+            quotes.append(line)
+            expecting_quote = False
+    return quotes
+
+
+def pick_random_quote() -> Optional[str]:
+    quotes = load_quotes()
+    if not quotes:
+        return None
+    return random.choice(quotes)
+
+
+async def send_daily_quote(channel: discord.abc.Messageable) -> None:
+    quote = pick_random_quote()
+    if quote is None:
+        await channel.send("Nincs elérhető mondás a mai napra.")
+        return
+    await channel.send(f'A nap mondása: "{quote}"')
+
+
+@tasks.loop(hours=24)
+async def daily_quote_task():
+    channel = bot.get_channel(QUOTES_CHANNEL_ID)
+    if channel is None:
+        try:
+            channel = await bot.fetch_channel(QUOTES_CHANNEL_ID)
+        except discord.NotFound:
+            print("Quotes channel not found.")
+            return
+        except discord.Forbidden:
+            print("Missing permissions to access quotes channel.")
+            return
+
+    await send_daily_quote(channel)
+
+
+@daily_quote_task.before_loop
+async def before_daily_quote_task():
+    await bot.wait_until_ready()
+    now = datetime.datetime.now()
+    target = now.replace(hour=12, minute=0, second=0, microsecond=0)
+    if now >= target:
+        target += datetime.timedelta(days=1)
+    wait_seconds = (target - now).total_seconds()
+    print(f"Next quote scheduled in {wait_seconds:.0f}s (epoch {time.time():.0f}).")
+    await asyncio.sleep(wait_seconds)
 
 # --- BELSŐ API ---
 async def handle_share_video(request):
@@ -236,6 +315,9 @@ async def on_ready():
     if not getattr(bot, 'internal_server_started', False):
         bot.loop.create_task(start_internal_server())
         bot.internal_server_started = True
+    if not getattr(bot, 'daily_quote_task_started', False):
+        daily_quote_task.start()
+        bot.daily_quote_task_started = True
 
 
 @bot.event
@@ -607,6 +689,18 @@ async def titkosteszt(ctx):
 
 @titkosteszt.error
 async def titkosteszt_error(ctx, error):
+    if isinstance(error, commands.MissingPermissions):
+        await ctx.send("Ehhez a parancshoz admin jogosultság kell!")
+
+
+@bot.command(name='mondas_teszt')
+@commands.has_permissions(administrator=True)
+async def mondas_teszt(ctx):
+    await send_daily_quote(ctx.channel)
+
+
+@mondas_teszt.error
+async def mondas_teszt_error(ctx, error):
     if isinstance(error, commands.MissingPermissions):
         await ctx.send("Ehhez a parancshoz admin jogosultság kell!")
 
