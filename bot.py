@@ -19,6 +19,10 @@ MAX_TIME = 7200  # Maximum 2 óra
 INTERNAL_API_PORT = 5050  # Port az internal API-hoz (Docker konténeren belül)
 TARGET_CHANNEL_ID: Optional[int] = 1370685414578327594
 
+# --- PRANK ÁLLAPOT ---
+prank_enabled = True
+prank_mode = 'normal'  # normal | jimmy | mixed
+
 load_dotenv()
 TOKEN = os.getenv('DISCORD_TOKEN')
 SPOTIPY_CLIENT_ID = os.getenv('SPOTIPY_CLIENT_ID')
@@ -145,6 +149,27 @@ async def start_internal_server():
     bot.internal_api_runner = runner
     print(f"Internal API running on 0.0.0.0:{INTERNAL_API_PORT}")
 
+# --- PRANK SEGÉDEK ---
+def get_audio_files(folder: str):
+    if not os.path.exists(folder):
+        return []
+    return [f for f in os.listdir(folder) if f.endswith('.mp3')]
+
+
+def select_prank_file():
+    if prank_mode == 'jimmy':
+        candidates = [('jimmy', f) for f in get_audio_files('jimmy')]
+    elif prank_mode == 'mixed':
+        candidates = [('sounds', f) for f in get_audio_files('sounds')] + [('jimmy', f) for f in get_audio_files('jimmy')]
+    else:
+        candidates = [('sounds', f) for f in get_audio_files('sounds')]
+
+    if not candidates:
+        return None
+
+    folder, filename = random.choice(candidates)
+    return os.path.join(folder, filename), filename
+
 # --- AUTOMATA IJESZTGETŐS LOOP ---
 async def prank_loop():
     await bot.wait_until_ready()
@@ -153,11 +178,13 @@ async def prank_loop():
         print(f"👻 A szellem vár {wait_time} másodpercet...")
         await asyncio.sleep(wait_time)
 
-        if not os.path.exists('sounds'):
+        if not prank_enabled:
             continue
-        sound_files = [f for f in os.listdir('sounds') if f.endswith('.mp3')]
-        if not sound_files:
+
+        selection = select_prank_file()
+        if not selection:
             continue
+        file_path, selected_file = selection
 
         target_channel = None
         target_guild = None
@@ -172,8 +199,6 @@ async def prank_loop():
                 break 
         
         if target_channel:
-            selected_file = random.choice(sound_files)
-            file_path = os.path.join('sounds', selected_file)
             print(f"😈 Ijesztgetés ({selected_file}) itt: {target_guild.name} -> {target_channel.name}")
             
             try:
@@ -400,6 +425,85 @@ async def rulett_error(ctx, error):
     if isinstance(error, commands.MissingPermissions):
         await ctx.send("Ehhez a parancshoz admin jogosultság kell!")
 
+
+# --- PRANK PARANCSOK ---
+@bot.command(name='Random-bejátszás')
+@commands.has_permissions(administrator=True)
+async def random_bejatszas(ctx, state: str):
+    global prank_enabled
+    state_lower = state.lower()
+    if state_lower not in {'on', 'off'}:
+        await ctx.send("Használat: !Random-bejátszás <on/off>")
+        return
+    prank_enabled = state_lower == 'on'
+    status = "bekapcsolva" if prank_enabled else "kikapcsolva"
+    await ctx.send(f"✅ Automata bejátszás {status}.")
+
+
+@random_bejatszas.error
+async def random_bejatszas_error(ctx, error):
+    if isinstance(error, commands.MissingPermissions):
+        await ctx.send("Ehhez a parancshoz admin jogosultság kell!")
+    if isinstance(error, commands.MissingRequiredArgument):
+        await ctx.send("Használat: !Random-bejátszás <on/off>")
+
+
+@bot.command(name='Jimmy')
+@commands.has_permissions(administrator=True)
+async def jimmy_mod(ctx, mode: str):
+    global prank_mode
+    if mode.lower() != 'mód':
+        await ctx.send("Használat: !Jimmy mód")
+        return
+    prank_mode = 'jimmy'
+    await ctx.send("✅ Jimmy mód aktiválva.")
+
+
+@jimmy_mod.error
+async def jimmy_mod_error(ctx, error):
+    if isinstance(error, commands.MissingPermissions):
+        await ctx.send("Ehhez a parancshoz admin jogosultság kell!")
+    if isinstance(error, commands.MissingRequiredArgument):
+        await ctx.send("Használat: !Jimmy mód")
+
+
+@bot.command(name='Normál')
+@commands.has_permissions(administrator=True)
+async def normal_mod(ctx, mode: str):
+    global prank_mode
+    if mode.lower() != 'mód':
+        await ctx.send("Használat: !Normál mód")
+        return
+    prank_mode = 'normal'
+    await ctx.send("✅ Normál mód aktiválva.")
+
+
+@normal_mod.error
+async def normal_mod_error(ctx, error):
+    if isinstance(error, commands.MissingPermissions):
+        await ctx.send("Ehhez a parancshoz admin jogosultság kell!")
+    if isinstance(error, commands.MissingRequiredArgument):
+        await ctx.send("Használat: !Normál mód")
+
+
+@bot.command(name='Vegyes')
+@commands.has_permissions(administrator=True)
+async def vegyes_mod(ctx, mode: str):
+    global prank_mode
+    if mode.lower() != 'mód':
+        await ctx.send("Használat: !Vegyes mód")
+        return
+    prank_mode = 'mixed'
+    await ctx.send("✅ Vegyes mód aktiválva.")
+
+
+@vegyes_mod.error
+async def vegyes_mod_error(ctx, error):
+    if isinstance(error, commands.MissingPermissions):
+        await ctx.send("Ehhez a parancshoz admin jogosultság kell!")
+    if isinstance(error, commands.MissingRequiredArgument):
+        await ctx.send("Használat: !Vegyes mód")
+
 # --- ÚJ PARANCS: SAJÁT ZENÉK LISTÁZÁSA ---
 @bot.command(name='sajat-zenek')
 async def sajat_zenek(ctx):
@@ -459,6 +563,7 @@ async def leave(ctx):
         await ctx.send("👋 Most már ez vagyok én, egy süllyedő hajó.")
 
 @bot.command(name='titkosteszt')
+@commands.has_permissions(administrator=True)
 async def titkosteszt(ctx):
     if not ctx.message.author.voice:
         await ctx.send("❌ Előbb lépj be egy csatornára öreg")
@@ -468,11 +573,11 @@ async def titkosteszt(ctx):
         await ctx.send("❌ Jelenleg megy a zene, mit képzelsz?")
         return
 
-    if not os.path.exists('sounds') or not os.listdir('sounds'):
+    sound_files = get_audio_files('sounds')
+    if not sound_files:
         await ctx.send("❌ Hiba: Nincs 'sounds' mappa vagy üres!")
         return
-    
-    sound_files = [f for f in os.listdir('sounds') if f.endswith('.mp3')]
+
     selected_file = random.choice(sound_files)
     file_path = os.path.join('sounds', selected_file)
 
@@ -498,6 +603,61 @@ async def titkosteszt(ctx):
 
     except Exception as e:
         await ctx.send(f"❌ Hiba történt a teszt közben: {e}")
+
+
+@titkosteszt.error
+async def titkosteszt_error(ctx, error):
+    if isinstance(error, commands.MissingPermissions):
+        await ctx.send("Ehhez a parancshoz admin jogosultság kell!")
+
+
+@bot.command(name='Jimmyteszt')
+@commands.has_permissions(administrator=True)
+async def jimmyteszt(ctx):
+    if not ctx.message.author.voice:
+        await ctx.send("❌ Előbb lépj be egy csatornára öreg")
+        return
+
+    if ctx.voice_client and ctx.voice_client.is_playing():
+        await ctx.send("❌ Jelenleg megy a zene, mit képzelsz?")
+        return
+
+    jimmy_files = get_audio_files('jimmy')
+    if not jimmy_files:
+        await ctx.send("❌ Hiba: Nincs 'jimmy' mappa vagy üres!")
+        return
+
+    selected_file = random.choice(jimmy_files)
+    file_path = os.path.join('jimmy', selected_file)
+
+    await ctx.send(f"😈 Teszt indul! Lejátszás: `{selected_file}`")
+
+    try:
+        channel = ctx.message.author.voice.channel
+        voice_client = ctx.voice_client
+
+        if not voice_client:
+            voice_client = await channel.connect()
+        else:
+            await voice_client.move_to(channel)
+
+        source = discord.FFmpegPCMAudio(file_path)
+        voice_client.play(source)
+
+        while voice_client.is_playing():
+            await asyncio.sleep(1)
+
+        await voice_client.disconnect()
+        await ctx.send("👻 Átvirrasztott éjszakák, száz el nem mondott szó.")
+
+    except Exception as e:
+        await ctx.send(f"❌ Hiba történt a teszt közben: {e}")
+
+
+@jimmyteszt.error
+async def jimmyteszt_error(ctx, error):
+    if isinstance(error, commands.MissingPermissions):
+        await ctx.send("Ehhez a parancshoz admin jogosultság kell!")
 
 bot.run(TOKEN)
 
