@@ -13,5 +13,7 @@ services:
       - ./jimmy:/app/jimmy
       - ./cookies.txt:/app/cookies.txt
       - ./quotes:/app/quotes
+      - ./roulette_sounds:/app/roulette_sounds
+
 
     
