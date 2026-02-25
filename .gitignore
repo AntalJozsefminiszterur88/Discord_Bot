@@ -9,3 +9,13 @@ __pycache__/
 # Virtual environments
 .venv/
 venv/
+
+# Local runtime data and media assets
+scheduled_messages.json
+jimmy/
+music/
+sounds/
+roulette_sounds/
+radnai_alert/*.mp3
+radnai_alert/*.wav
+radnai_alert/*.webm
