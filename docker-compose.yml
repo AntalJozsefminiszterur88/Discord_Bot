@@ -7,6 +7,12 @@ services:
     restart: unless-stopped
     env_file:
       - .env
+    # --- EZT A 2 SORT KELL BEÍRNOD A VOLUMES FÖLÉ VAGY ALÁ ---
+    networks:
+      - umkgl-network
+    # ---------------------------------------------------------
+    ports:
+      - "5050:5050"
     volumes:
       - ./sounds:/app/sounds
       - ./music:/app/music
@@ -14,6 +20,9 @@ services:
       - ./cookies.txt:/app/cookies.txt
       - ./quotes:/app/quotes
       - ./roulette_sounds:/app/roulette_sounds
+      - ./scheduled_messages.json:/app/scheduled_messages.json
 
-
-    
+# --- EZT PEDIG A FÁJL LEGZSÁRÁRA (NEM BELJEBB HÚZVA!) ---
+networks:
+  umkgl-network:
+    external: true
