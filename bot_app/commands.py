@@ -4,6 +4,56 @@ from bot_app.automation import send_daily_quote
 import bot_app.core as core
 
 
+def _voice_channel_name(channel: Optional[discord.VoiceChannel]) -> str:
+    if channel is None:
+        return "none"
+    return f"{channel.guild.name}/{channel.name}({channel.id})"
+
+
+async def ensure_voice_client(ctx, target_channel):
+    guild_id = ctx.guild.id
+    lock = get_voice_operation_lock(guild_id)
+    async with lock:
+        voice_client = ctx.guild.voice_client
+        if voice_client and not voice_client.is_connected():
+            logger.warning(
+                "Found stale voice client, disconnecting. guild=%s channel=%s",
+                guild_id,
+                _voice_channel_name(getattr(voice_client, "channel", None)),
+            )
+            try:
+                await voice_client.disconnect(force=True)
+            except Exception:
+                logger.exception("Failed to disconnect stale voice client. guild=%s", guild_id)
+            voice_client = None
+
+        try:
+            if not voice_client:
+                voice_client = await target_channel.connect()
+                logger.info(
+                    "Voice connected by command. guild=%s channel=%s user=%s",
+                    guild_id,
+                    _voice_channel_name(target_channel),
+                    ctx.author.id,
+                )
+            elif voice_client.channel != target_channel:
+                logger.info(
+                    "Voice moved by command. guild=%s from=%s to=%s user=%s",
+                    guild_id,
+                    _voice_channel_name(voice_client.channel),
+                    _voice_channel_name(target_channel),
+                    ctx.author.id,
+                )
+                await voice_client.move_to(target_channel)
+        except Exception as exc:
+            normalized_exc = normalize_voice_runtime_error(exc)
+            if normalized_exc is exc:
+                raise
+            raise normalized_exc from exc
+
+        return voice_client
+
+
 @bot.command(name="help")
 async def help_command(ctx):
     embed = discord.Embed(
@@ -63,10 +113,16 @@ async def join(ctx):
         await ctx.send("Nem vagy bent egy hangcsatornában sem!")
         return
     channel = ctx.message.author.voice.channel
-    if ctx.voice_client is None:
-        await channel.connect()
-    else:
-        await ctx.voice_client.move_to(channel)
+    try:
+        await ensure_voice_client(ctx, channel)
+    except Exception as e:
+        logger.exception(
+            "Join command failed. guild=%s channel=%s user=%s",
+            ctx.guild.id,
+            _voice_channel_name(channel),
+            ctx.author.id,
+        )
+        await ctx.send(f"Nem sikerult csatlakozni: {e}")
 
 
 @bot.command(name="mondd")
@@ -82,10 +138,7 @@ async def mondd(ctx, *, text: str):
         await ctx.send("Várd meg, míg a jelenlegi lejátszás véget ér!")
         return
 
-    if not voice_client:
-        voice_client = await channel.connect()
-    else:
-        await voice_client.move_to(channel)
+    voice_client = await ensure_voice_client(ctx, channel)
 
     tts_file = "tts_temp.mp3"
     try:
@@ -105,6 +158,13 @@ async def mondd(ctx, *, text: str):
 @bot.command(name="play")
 async def play(ctx, *, url):
     guild_id = ctx.guild.id
+    logger.info(
+        "Play command received. guild=%s channel=%s user=%s query=%s",
+        guild_id,
+        ctx.channel.id,
+        ctx.author.id,
+        url,
+    )
     author_voice = ctx.message.author.voice
     if not author_voice or not author_voice.channel:
         await ctx.send("Lepj be egy hangcsatornaba elobb!")
@@ -121,10 +181,17 @@ async def play(ctx, *, url):
             await ctx.send("Nincs beszed jogom ebben a hangcsatornaban (Speak hianyzik).")
             return
 
-    if not ctx.voice_client:
-        await target_channel.connect()
-    elif ctx.voice_client.channel != target_channel:
-        await ctx.voice_client.move_to(target_channel)
+    try:
+        await ensure_voice_client(ctx, target_channel)
+    except Exception as e:
+        logger.exception(
+            "Initial ensure_voice_client failed in play. guild=%s target=%s user=%s",
+            guild_id,
+            _voice_channel_name(target_channel),
+            ctx.author.id,
+        )
+        await ctx.send(f"Nem tudok csatlakozni a hangcsatornahoz: {e}")
+        return
 
     ensure_queue(guild_id)
 
@@ -156,6 +223,12 @@ async def play(ctx, *, url):
                             f"Spotify: **{artist_name} - {track_name}** keresese..."
                         )
                     except Exception:
+                        logger.exception(
+                            "Spotify metadata lookup failed in play. guild=%s user=%s url=%s",
+                            guild_id,
+                            ctx.author.id,
+                            url,
+                        )
                         await ctx.send("Hiba a Spotify link feldolgozasakor.")
                         return
                 elif not url.startswith("http"):
@@ -182,7 +255,9 @@ async def play(ctx, *, url):
                         if extracted_candidates:
                             candidate_queries = extracted_candidates[:5]
                     except Exception as e:
-                        print(f"Search expansion failed for '{expanded_query}': {e}")
+                        logger.warning(
+                            "Search expansion failed for '%s': %s", expanded_query, e
+                        )
 
                 download_errors = []
                 for candidate in candidate_queries:
@@ -191,7 +266,7 @@ async def play(ctx, *, url):
                         break
                     except Exception as e:
                         download_errors.append(e)
-                        print(f"Download mode failed for '{candidate}': {e}")
+                        logger.warning("Download mode failed for '%s': %s", candidate, e)
 
                 if player is None:
                     for candidate in candidate_queries:
@@ -200,7 +275,11 @@ async def play(ctx, *, url):
                             await ctx.send("A letoltes nem sikerult, stream modra valtottam.")
                             break
                         except Exception as stream_error:
-                            print(f"Stream fallback failed for '{candidate}': {stream_error}")
+                            logger.warning(
+                                "Stream fallback failed for '%s': %s",
+                                candidate,
+                                stream_error,
+                            )
 
                 if player is None:
                     base_error = download_errors[-1] if download_errors else "Nincs lejatszhato forras."
@@ -210,14 +289,49 @@ async def play(ctx, *, url):
                     await ctx.send(f"Hiba a lejatsszasnal: {short_error}")
                     return
 
-            voice_channel = ctx.voice_client
-            mixer = get_mixer(voice_channel)
+            try:
+                voice_channel = await ensure_voice_client(ctx, target_channel)
+            except Exception as e:
+                cleanup_audio_source(player)
+                logger.exception(
+                    "Re-ensure voice client failed in play. guild=%s target=%s user=%s",
+                    guild_id,
+                    _voice_channel_name(target_channel),
+                    ctx.author.id,
+                )
+                await ctx.send(f"Elveszett a hangkapcsolat, ujracsatlakozas sikertelen: {e}")
+                return
+
+            if not voice_channel:
+                cleanup_audio_source(player)
+                await ctx.send("Elveszett a hangkapcsolat, probald ujra a !play parancsot.")
+                return
+
+            try:
+                mixer = get_mixer(voice_channel)
+            except Exception as e:
+                cleanup_audio_source(player)
+                logger.exception(
+                    "Failed to initialize mixer in play. guild=%s channel=%s user=%s",
+                    guild_id,
+                    _voice_channel_name(voice_channel.channel if hasattr(voice_channel, 'channel') else target_channel),
+                    ctx.author.id,
+                )
+                await ctx.send(f"Nem sikerult elinditani a lejatszot: {e}")
+                return
             if mixer.main_source or voice_channel.is_paused():
                 song_queues[guild_id].append(player)
                 titles_queues[guild_id].append(player.title)
+                logger.info(
+                    "Track queued. guild=%s title=%s queue_length=%s",
+                    guild_id,
+                    player.title,
+                    len(titles_queues[guild_id]),
+                )
                 await ctx.send(f"Sorba allitva: **{player.title}**")
             else:
                 mixer.set_main_source(player, on_end=lambda: play_next_in_queue(ctx))
+                logger.info("Track started. guild=%s title=%s", guild_id, player.title)
                 await ctx.send(f"Most szol: **{player.title}**")
 
 
@@ -265,10 +379,7 @@ async def rulett2(ctx):
     voice_client = ctx.voice_client
     channel = ctx.message.author.voice.channel
 
-    if not voice_client:
-        voice_client = await channel.connect()
-    else:
-        await voice_client.move_to(channel)
+    voice_client = await ensure_voice_client(ctx, channel)
 
     game = roulette_games.get(ctx.guild.id)
     if game and game.active:
@@ -354,6 +465,12 @@ async def random_bejatszas(ctx, state: str):
         return
     core.prank_enabled = state_lower == "on"
     status = "bekapcsolva" if core.prank_enabled else "kikapcsolva"
+    logger.info(
+        "Prank enabled changed by command. guild=%s user=%s value=%s",
+        ctx.guild.id if ctx.guild else "dm",
+        ctx.author.id if ctx.author else "unknown",
+        core.prank_enabled,
+    )
     await ctx.send(f"✅ Automata bejátszás {status}.")
 
 
@@ -372,6 +489,12 @@ async def jimmy_mod(ctx, mode: str):
         await ctx.send("Használat: !Jimmy mód")
         return
     core.prank_mode = "jimmy"
+    logger.info(
+        "Prank mode changed. guild=%s user=%s mode=%s",
+        ctx.guild.id if ctx.guild else "dm",
+        ctx.author.id if ctx.author else "unknown",
+        core.prank_mode,
+    )
     await ctx.send("✅ Jimmy mód aktiválva.")
 
 
@@ -390,6 +513,12 @@ async def normal_mod(ctx, mode: str):
         await ctx.send("Használat: !Normál mód")
         return
     core.prank_mode = "normal"
+    logger.info(
+        "Prank mode changed. guild=%s user=%s mode=%s",
+        ctx.guild.id if ctx.guild else "dm",
+        ctx.author.id if ctx.author else "unknown",
+        core.prank_mode,
+    )
     await ctx.send("✅ Normál mód aktiválva.")
 
 
@@ -408,6 +537,12 @@ async def vegyes_mod(ctx, mode: str):
         await ctx.send("Használat: !Vegyes mód")
         return
     core.prank_mode = "mixed"
+    logger.info(
+        "Prank mode changed. guild=%s user=%s mode=%s",
+        ctx.guild.id if ctx.guild else "dm",
+        ctx.author.id if ctx.author else "unknown",
+        core.prank_mode,
+    )
     await ctx.send("✅ Vegyes mód aktiválva.")
 
 
@@ -478,14 +613,29 @@ async def leave(ctx):
     voice_client = ctx.voice_client
     if voice_client:
         guild_id = ctx.guild.id
+        lock = get_voice_operation_lock(guild_id)
         if guild_id in afktasks:
             afktasks[guild_id].cancel()
             del afktasks[guild_id]
         clear_guild_queue(guild_id)
         mixers.pop(guild_id, None)
         roulette_games.pop(guild_id, None)
-        await voice_client.disconnect()
-        await ctx.send("👋 Most már ez vagyok én, egy süllyedő hajó.")
+        logger.info(
+            "Leave command triggered disconnect. guild=%s channel=%s user=%s",
+            guild_id,
+            _voice_channel_name(voice_client.channel),
+            ctx.author.id,
+        )
+        async with lock:
+            await voice_client.disconnect()
+        await ctx.send("Most mar ez vagyok en, egy sullyedo hajo.")
+        return
+
+    logger.info(
+        "Leave command called without active voice client. guild=%s user=%s",
+        ctx.guild.id if ctx.guild else "dm",
+        ctx.author.id if ctx.author else "unknown",
+    )
 
 
 @bot.command(name="lábhoz")
@@ -503,9 +653,18 @@ async def labhoz(ctx):
     roulette_games.pop(guild_id, None)
     voice_client = ctx.voice_client
     if voice_client:
+        lock = get_voice_operation_lock(guild_id)
         if voice_client.is_playing() or voice_client.is_paused():
             voice_client.stop()
-        await voice_client.disconnect()
+            logger.info("Labhoz stopped active playback. guild=%s", guild_id)
+        logger.info(
+            "Labhoz disconnecting voice client. guild=%s channel=%s user=%s",
+            guild_id,
+            _voice_channel_name(voice_client.channel),
+            ctx.author.id,
+        )
+        async with lock:
+            await voice_client.disconnect()
     message = "🐕 Igenis, gazdám! (Minden folyamat leállítva, memória törölve)."
     if radnai_stopped:
         message = f"{message} Radnai riadó is leállítva."
@@ -556,14 +715,9 @@ async def titkosteszt(ctx):
 
     try:
         channel = ctx.message.author.voice.channel
-        voice_client = ctx.voice_client
-        created = False
-
-        if not voice_client:
-            voice_client = await channel.connect()
-            created = True
-        else:
-            await voice_client.move_to(channel)
+        had_voice_client = bool(ctx.voice_client and ctx.voice_client.is_connected())
+        voice_client = await ensure_voice_client(ctx, channel)
+        created = not had_voice_client
 
         mixer = get_mixer(voice_client)
         mixer.add_sfx(discord.FFmpegPCMAudio(file_path, options="-vn"))
@@ -572,10 +726,18 @@ async def titkosteszt(ctx):
             await asyncio.sleep(1)
 
         if created and not mixer.main_source:
-            await voice_client.disconnect()
+            lock = get_voice_operation_lock(ctx.guild.id)
+            async with lock:
+                await voice_client.disconnect()
         await ctx.send("👻 Átvirrasztott éjszakák, száz el nem mondott szó.")
 
     except Exception as e:
+        logger.exception(
+            "Titkosteszt failed. guild=%s user=%s file=%s",
+            ctx.guild.id if ctx.guild else "dm",
+            ctx.author.id if ctx.author else "unknown",
+            selected_file,
+        )
         await ctx.send(f"❌ Hiba történt a teszt közben: {e}")
 
 
@@ -616,14 +778,9 @@ async def jimmyteszt(ctx):
 
     try:
         channel = ctx.message.author.voice.channel
-        voice_client = ctx.voice_client
-        created = False
-
-        if not voice_client:
-            voice_client = await channel.connect()
-            created = True
-        else:
-            await voice_client.move_to(channel)
+        had_voice_client = bool(ctx.voice_client and ctx.voice_client.is_connected())
+        voice_client = await ensure_voice_client(ctx, channel)
+        created = not had_voice_client
 
         mixer = get_mixer(voice_client)
         mixer.add_sfx(discord.FFmpegPCMAudio(file_path, options="-vn"))
@@ -632,10 +789,18 @@ async def jimmyteszt(ctx):
             await asyncio.sleep(1)
 
         if created and not mixer.main_source:
-            await voice_client.disconnect()
+            lock = get_voice_operation_lock(ctx.guild.id)
+            async with lock:
+                await voice_client.disconnect()
         await ctx.send("👻 Átvirrasztott éjszakák, száz el nem mondott szó.")
 
     except Exception as e:
+        logger.exception(
+            "Jimmyteszt failed. guild=%s user=%s file=%s",
+            ctx.guild.id if ctx.guild else "dm",
+            ctx.author.id if ctx.author else "unknown",
+            selected_file,
+        )
         await ctx.send(f"❌ Hiba történt a teszt közben: {e}")
 
 

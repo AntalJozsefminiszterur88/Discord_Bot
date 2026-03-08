@@ -19,6 +19,7 @@ from discord.ext import commands, tasks
 from dotenv import load_dotenv
 from gtts import gTTS
 from spotipy.oauth2 import SpotifyClientCredentials
+from bot_app.logging_setup import get_logger, setup_logging
 
 # --- BEÁLLÍTÁSOK ---
 MIN_TIME = 1800  # Minimum 30 perc
@@ -39,6 +40,9 @@ prank_enabled = True
 prank_mode = "normal"  # normal | jimmy | mixed
 last_prank_date: Optional[datetime.date] = None
 
+setup_logging()
+logger = get_logger(__name__)
+
 load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
 SPOTIPY_CLIENT_ID = os.getenv("SPOTIPY_CLIENT_ID")
@@ -58,6 +62,7 @@ bot.remove_command("help")
 song_queues = {}
 titles_queues = {}
 play_locks = {}
+voice_operation_locks = {}
 afktasks = {}
 mixers = {}
 roulette_games = {}
@@ -100,7 +105,7 @@ def cleanup_audio_source(source: Optional[discord.AudioSource]) -> None:
     try:
         cleanup()
     except Exception as e:
-        print(f"Audio source cleanup error: {e}")
+        logger.warning("Audio source cleanup error: %s", e)
 
 
 def build_ffmpeg_options(*, stream: bool, data: Optional[dict] = None) -> dict:
@@ -136,6 +141,32 @@ def get_play_lock(guild_id: int) -> asyncio.Lock:
         lock = asyncio.Lock()
         play_locks[guild_id] = lock
     return lock
+
+
+def get_voice_operation_lock(guild_id: int) -> asyncio.Lock:
+    lock = voice_operation_locks.get(guild_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        voice_operation_locks[guild_id] = lock
+    return lock
+
+
+def normalize_voice_runtime_error(exc: Exception) -> Exception:
+    message = str(exc).strip()
+    lowered_message = message.casefold()
+    if "needed in order to use voice" not in lowered_message:
+        return exc
+
+    dependency_name = "voice dependency"
+    if "pynacl" in lowered_message:
+        dependency_name = "PyNaCl"
+    elif "davey" in lowered_message:
+        dependency_name = "davey"
+
+    return RuntimeError(
+        f"Voice dependency hianyzik a futo kornyezetbol ({dependency_name}). "
+        "Telepitsd ujra a fuggosegeket, majd epitsd ujra es inditsd ujra a botot."
+    )
 
 
 class MixingAudioSource(discord.AudioSource):
@@ -266,7 +297,9 @@ class YTDLSource(discord.PCMVolumeTransformer):
                 try:
                     os.remove(self.temp_file)
                 except OSError as e:
-                    print(f"Temp audio cleanup failed ({self.temp_file}): {e}")
+                    logger.warning(
+                        "Temp audio cleanup failed (%s): %s", self.temp_file, e
+                    )
                 finally:
                     self.temp_file = None
 
@@ -355,7 +388,9 @@ class RouletteGame:
         roulette_games.pop(guild_id, None)
         if self.voice_client.is_playing() or self.voice_client.is_paused():
             self.voice_client.stop()
-        await self.voice_client.disconnect()
+        lock = get_voice_operation_lock(guild_id)
+        async with lock:
+            await self.voice_client.disconnect()
 
     async def end_game(self, ctx, result_message: discord.Message) -> None:
         await self._cleanup_messages(ctx, exclude_message_id=result_message.id)
@@ -617,7 +652,7 @@ def save_last_prank_date(value: datetime.date) -> None:
         with open(PRANK_STATE_FILE, "w", encoding="utf-8") as state_file:
             json.dump({"last_prank_date": value.isoformat()}, state_file)
     except OSError as e:
-        print(f"Failed to save prank state: {e}")
+        logger.warning("Failed to save prank state: %s", e)
 
 
 

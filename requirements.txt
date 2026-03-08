@@ -1,6 +1,5 @@
-discord.py
+discord.py[voice]==2.6.4
 yt-dlp
-PyNaCl
 python-dotenv
 spotipy
 aiohttp

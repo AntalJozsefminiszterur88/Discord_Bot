@@ -29,11 +29,17 @@ async def handle_share_video(request):
         return web.Response(status=500, text="Target channel not found")
 
     try:
-        print(f"[INTERNAL API] Új videó érkezett: {title} ({url}) feltöltő: {uploader}")
+        logger.info(
+            "[INTERNAL API] share-video received. title=%s url=%s uploader=%s",
+            title,
+            url,
+            uploader,
+        )
         message = f"{url}\n**{title}**"
         await channel.send(message)
         return web.Response(status=200, text="Video shared successfully")
     except Exception as e:
+        logger.exception("Failed to process /share-video request.")
         return web.Response(status=500, text=f"Failed to send message: {e}")
 
 
@@ -74,6 +80,7 @@ async def play_radnai_voice_alert(alert_sound_path: str, stop_event: asyncio.Eve
 
     if not os.path.exists(alert_sound_path):
         warnings.append(f"Alert sound file not found: {alert_sound_path}")
+        logger.warning("Radnai alert sound file not found: %s", alert_sound_path)
         return voice_alerts_played, warnings
 
     for guild in bot.guilds:
@@ -81,6 +88,7 @@ async def play_radnai_voice_alert(alert_sound_path: str, stop_event: asyncio.Eve
             break
 
         try:
+            lock = get_voice_operation_lock(guild.id)
             candidates = [
                 voice_channel
                 for voice_channel in guild.voice_channels
@@ -99,11 +107,43 @@ async def play_radnai_voice_alert(alert_sound_path: str, stop_event: asyncio.Eve
                 target_channel = voice_client.channel
 
             created = False
-            if not voice_client:
-                voice_client = await target_channel.connect()
-                created = True
-            elif voice_client.channel != target_channel:
-                await voice_client.move_to(target_channel)
+            async with lock:
+                if voice_client and not voice_client.is_connected():
+                    logger.warning(
+                        "Radnai alert found stale voice client, disconnecting. guild=%s",
+                        guild.id,
+                    )
+                    try:
+                        await voice_client.disconnect(force=True)
+                    except Exception:
+                        logger.exception(
+                            "Failed to disconnect stale voice client in radnai alert. guild=%s",
+                            guild.id,
+                        )
+                    voice_client = None
+
+                if not voice_client:
+                    try:
+                        voice_client = await target_channel.connect()
+                    except Exception as exc:
+                        normalized_exc = normalize_voice_runtime_error(exc)
+                        if normalized_exc is exc:
+                            raise
+                        raise normalized_exc from exc
+                    created = True
+                    logger.info(
+                        "Radnai alert connected to voice. guild=%s channel=%s",
+                        guild.id,
+                        target_channel.id,
+                    )
+                elif voice_client.channel != target_channel:
+                    logger.info(
+                        "Radnai alert moved voice. guild=%s from=%s to=%s",
+                        guild.id,
+                        voice_client.channel.id if voice_client.channel else "none",
+                        target_channel.id,
+                    )
+                    await voice_client.move_to(target_channel)
 
             mixer = get_mixer(voice_client)
             mixer.add_sfx(discord.FFmpegPCMAudio(alert_sound_path, options="-vn"))
@@ -115,11 +155,22 @@ async def play_radnai_voice_alert(alert_sound_path: str, stop_event: asyncio.Eve
                 voice_client.stop()
 
             if created and not mixer.main_source:
-                await voice_client.disconnect()
+                async with lock:
+                    await voice_client.disconnect()
+                logger.info(
+                    "Radnai alert disconnected from voice. guild=%s channel=%s",
+                    guild.id,
+                    target_channel.id,
+                )
 
             voice_alerts_played += 1
         except Exception as e:
             warnings.append(f"{guild.name}: {e}")
+            logger.exception(
+                "Radnai voice alert failed in guild=%s(%s)",
+                guild.name,
+                guild.id,
+            )
 
     return voice_alerts_played, warnings
 
@@ -142,6 +193,11 @@ async def handle_radnai_alert(request):
 
     alert_type = str(data.get("type") or "change").lower()
     alert_error = data.get("error")
+    logger.info(
+        "Internal API /alert-radnai received. type=%s has_error=%s",
+        alert_type,
+        alert_error is not None,
+    )
     type_warning = None
     if alert_type not in {"change", "outage"}:
         type_warning = f"Unknown alert type '{alert_type}', defaulted to change"
@@ -212,19 +268,23 @@ async def handle_radnai_alert(request):
     if alert_type == "outage":
         if not chat_alert_sent:
             details = "; ".join(warnings) if warnings else "No alert target available"
+            logger.warning("Radnai outage alert failed: %s", details)
             return web.Response(status=500, text=f"Radnai outage alert failed: {details}")
 
         details = f"chat_messages={chat_messages_sent}"
         if warnings:
             details = f"{details}, warnings={'; '.join(warnings)}"
+        logger.info("Radnai outage alert sent. %s", details)
         return web.Response(status=200, text=f"Radnai outage alert sent ({details})")
 
     if stopped_by_labhoz and not chat_alert_sent and voice_alerts_played == 0:
         details = "; ".join(warnings) if warnings else "Stopped by !l\u00e1bhoz"
+        logger.info("Radnai alert stopped: %s", details)
         return web.Response(status=200, text=f"Radnai alert stopped ({details})")
 
     if not chat_alert_sent and voice_alerts_played == 0:
         details = "; ".join(warnings) if warnings else "No alert targets available"
+        logger.warning("Radnai alert failed: %s", details)
         return web.Response(status=500, text=f"Radnai alert failed: {details}")
 
     details = (
@@ -236,6 +296,7 @@ async def handle_radnai_alert(request):
         details = f"{details}, stopped_by_labhoz=True"
     if warnings:
         details = f"{details}, warnings={'; '.join(warnings)}"
+    logger.info("Radnai alert triggered. %s", details)
     return web.Response(status=200, text=f"Radnai alert triggered ({details})")
 
 
@@ -259,7 +320,7 @@ async def start_internal_server():
     site = web.TCPSite(runner, "0.0.0.0", INTERNAL_API_PORT)
     await site.start()
     bot.internal_api_runner = runner
-    print(f"Internal API running on 0.0.0.0:{INTERNAL_API_PORT}")
+    logger.info("Internal API running on 0.0.0.0:%s", INTERNAL_API_PORT)
 
 
 # --- AUTOMATA IJESZTGETŐS LOOP ---

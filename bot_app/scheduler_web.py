@@ -194,7 +194,7 @@ def save_scheduled_messages() -> None:
         with open(SCHEDULED_MESSAGES_FILE, "w", encoding="utf-8") as state_file:
             json.dump(scheduled_messages, state_file, indent=2, ensure_ascii=False)
     except OSError as e:
-        print(f"Failed to save scheduled messages: {e}")
+        logger.warning("Failed to save scheduled messages: %s", e)
 
 
 def build_scheduler_html(default_channel_id: Optional[int]) -> str:
@@ -939,12 +939,14 @@ async def scheduled_message_dispatch_loop():
                     else:
                         target_item["status"] = "failed"
                         target_item["last_error"] = dispatch_error
-                        print(
-                            f"Scheduled message dispatch failed ({item_id}): {dispatch_error}"
+                        logger.warning(
+                            "Scheduled message dispatch failed (%s): %s",
+                            item_id,
+                            dispatch_error,
                         )
                     save_scheduled_messages()
         except Exception as e:
-            print(f"Scheduler loop error: {e}")
+            logger.exception("Scheduler loop error: %s", e)
 
         await asyncio.sleep(SCHEDULER_POLL_INTERVAL_SECONDS)
 

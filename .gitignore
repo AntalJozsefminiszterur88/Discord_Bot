@@ -19,3 +19,5 @@ roulette_sounds/
 radnai_alert/*.mp3
 radnai_alert/*.wav
 radnai_alert/*.webm
+logs/*.log
+logs/*.log.*
