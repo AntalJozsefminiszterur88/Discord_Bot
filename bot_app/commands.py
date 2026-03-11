@@ -10,9 +10,10 @@ def _voice_channel_name(channel: Optional[discord.VoiceChannel]) -> str:
     return f"{channel.guild.name}/{channel.name}({channel.id})"
 
 
-async def ensure_voice_client(ctx, target_channel):
+async def ensure_voice_client(ctx, target_channel, *, settle: bool = False):
     guild_id = ctx.guild.id
     lock = get_voice_operation_lock(guild_id)
+    connection_changed = False
     async with lock:
         voice_client = ctx.guild.voice_client
         if voice_client and not voice_client.is_connected():
@@ -30,6 +31,7 @@ async def ensure_voice_client(ctx, target_channel):
         try:
             if not voice_client:
                 voice_client = await target_channel.connect()
+                connection_changed = True
                 logger.info(
                     "Voice connected by command. guild=%s channel=%s user=%s",
                     guild_id,
@@ -45,13 +47,16 @@ async def ensure_voice_client(ctx, target_channel):
                     ctx.author.id,
                 )
                 await voice_client.move_to(target_channel)
+                connection_changed = True
         except Exception as exc:
             normalized_exc = normalize_voice_runtime_error(exc)
             if normalized_exc is exc:
                 raise
             raise normalized_exc from exc
 
-        return voice_client
+    if settle:
+        await settle_voice_connection(connection_changed)
+    return voice_client
 
 
 @bot.command(name="help")
@@ -138,7 +143,7 @@ async def mondd(ctx, *, text: str):
         await ctx.send("Várd meg, míg a jelenlegi lejátszás véget ér!")
         return
 
-    voice_client = await ensure_voice_client(ctx, channel)
+    voice_client = await ensure_voice_client(ctx, channel, settle=True)
 
     tts_file = "tts_temp.mp3"
     try:
@@ -290,7 +295,9 @@ async def play(ctx, *, url):
                     return
 
             try:
-                voice_channel = await ensure_voice_client(ctx, target_channel)
+                voice_channel = await ensure_voice_client(
+                    ctx, target_channel, settle=True
+                )
             except Exception as e:
                 cleanup_audio_source(player)
                 logger.exception(
@@ -379,7 +386,7 @@ async def rulett2(ctx):
     voice_client = ctx.voice_client
     channel = ctx.message.author.voice.channel
 
-    voice_client = await ensure_voice_client(ctx, channel)
+    voice_client = await ensure_voice_client(ctx, channel, settle=True)
 
     game = roulette_games.get(ctx.guild.id)
     if game and game.active:
@@ -716,11 +723,11 @@ async def titkosteszt(ctx):
     try:
         channel = ctx.message.author.voice.channel
         had_voice_client = bool(ctx.voice_client and ctx.voice_client.is_connected())
-        voice_client = await ensure_voice_client(ctx, channel)
+        voice_client = await ensure_voice_client(ctx, channel, settle=True)
         created = not had_voice_client
 
         mixer = get_mixer(voice_client)
-        mixer.add_sfx(discord.FFmpegPCMAudio(file_path, options="-vn"))
+        mixer.add_sfx(build_sfx_source(file_path))
 
         while mixer.has_sfx():
             await asyncio.sleep(1)
@@ -779,11 +786,11 @@ async def jimmyteszt(ctx):
     try:
         channel = ctx.message.author.voice.channel
         had_voice_client = bool(ctx.voice_client and ctx.voice_client.is_connected())
-        voice_client = await ensure_voice_client(ctx, channel)
+        voice_client = await ensure_voice_client(ctx, channel, settle=True)
         created = not had_voice_client
 
         mixer = get_mixer(voice_client)
-        mixer.add_sfx(discord.FFmpegPCMAudio(file_path, options="-vn"))
+        mixer.add_sfx(build_sfx_source(file_path))
 
         while mixer.has_sfx():
             await asyncio.sleep(1)

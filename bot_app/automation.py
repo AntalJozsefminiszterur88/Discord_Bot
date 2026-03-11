@@ -57,6 +57,56 @@ async def send_daily_quote(channel: discord.abc.Messageable) -> None:
     await channel.send(f'A nap mondása: "{quote}"')
 
 
+def _cancel_gateway_disconnect_watchdog() -> None:
+    watchdog_task = getattr(bot, "gateway_disconnect_watchdog_task", None)
+    if watchdog_task and not watchdog_task.done():
+        watchdog_task.cancel()
+    bot.gateway_disconnect_watchdog_task = None
+
+
+def _get_gateway_disconnect_started_at() -> Optional[float]:
+    started_at = getattr(bot, "gateway_disconnect_started_at", None)
+    if isinstance(started_at, (int, float)):
+        return float(started_at)
+    return None
+
+
+def _mark_gateway_recovered(recovery_event: str) -> None:
+    disconnect_started_at = _get_gateway_disconnect_started_at()
+    _cancel_gateway_disconnect_watchdog()
+    bot.gateway_disconnect_started_at = None
+    if disconnect_started_at is None:
+        return
+    disconnected_for = max(0.0, time.monotonic() - disconnect_started_at)
+    logger.info(
+        "Discord gateway recovered via %s after %.1fs disconnected.",
+        recovery_event,
+        disconnected_for,
+    )
+
+
+async def _gateway_disconnect_watchdog(disconnect_started_at: float) -> None:
+    if GATEWAY_RECOVERY_TIMEOUT_SECONDS <= 0:
+        return
+
+    try:
+        await asyncio.sleep(GATEWAY_RECOVERY_TIMEOUT_SECONDS)
+        if bot.is_closed():
+            return
+        active_disconnect_started_at = _get_gateway_disconnect_started_at()
+        if active_disconnect_started_at != disconnect_started_at:
+            return
+        logger.error(
+            "Discord gateway did not recover within %ss. Closing the bot process so the supervisor can restart it.",
+            GATEWAY_RECOVERY_TIMEOUT_SECONDS,
+        )
+        await bot.close()
+    except asyncio.CancelledError:
+        return
+    except Exception:
+        logger.exception("Gateway disconnect watchdog failed.")
+
+
 @tasks.loop(hours=24)
 async def daily_quote_task():
     channel = bot.get_channel(QUOTES_CHANNEL_ID)
@@ -82,7 +132,9 @@ async def before_daily_quote_task():
         target += datetime.timedelta(days=1)
     wait_seconds = (target - now).total_seconds()
     logger.info(
-        "Next quote scheduled in %.0fs (epoch %.0f).", wait_seconds, time.time()
+        "Next quote scheduled in %.0fs (target_epoch %.0f).",
+        wait_seconds,
+        target.timestamp(),
     )
     await asyncio.sleep(wait_seconds)
 
@@ -90,30 +142,94 @@ async def before_daily_quote_task():
 # --- BELSŐ API ---
 
 
+def _seconds_until_next_day(now: datetime.datetime) -> int:
+    tomorrow = datetime.datetime.combine(
+        now.date() + datetime.timedelta(days=1), datetime.time.min
+    )
+    return max(1, int((tomorrow - now).total_seconds()))
+
+
+def _reset_prank_state_if_needed(now: datetime.datetime) -> None:
+    if core.prank_state_date == now.date():
+        return
+    core.prank_state_date = now.date()
+    core.pranks_played_today = 0
+    save_prank_state(core.prank_state_date, core.pranks_played_today)
+    logger.info("Prank day reset. date=%s", core.prank_state_date)
+
+
+def _compute_prank_wait_seconds(now: datetime.datetime) -> int:
+    remaining_pranks = max(0, DAILY_PRANK_TARGET_COUNT - core.pranks_played_today)
+    if remaining_pranks <= 0:
+        return _seconds_until_next_day(now)
+
+    day_remaining = _seconds_until_next_day(now)
+    reserved_spacing = max(0, remaining_pranks - 1) * MIN_TIME
+    available_window = max(1, day_remaining - reserved_spacing)
+    wait_ceiling = max(1, available_window // remaining_pranks)
+    wait_floor = 1 if wait_ceiling <= MIN_TIME else MIN_TIME
+    return random.randint(wait_floor, wait_ceiling)
+
+
+def _pick_random_occupied_voice_channel():
+    candidates = []
+    for guild in bot.guilds:
+        if guild.voice_client and (
+            guild.voice_client.is_playing() or guild.voice_client.is_paused()
+        ):
+            logger.info(
+                "Skipping guild %s(%s): existing voice_client is active.",
+                guild.name,
+                guild.id,
+            )
+            continue
+
+        occupied_channels = [
+            voice_channel
+            for voice_channel in guild.voice_channels
+            if any(not member.bot for member in voice_channel.members)
+        ]
+        for channel in occupied_channels:
+            candidates.append((guild, channel))
+
+    if not candidates:
+        return None, None
+    return random.choice(candidates)
+
+
 async def prank_loop():
     await bot.wait_until_ready()
     logger.info("Prank loop started. enabled=%s mode=%s", core.prank_enabled, core.prank_mode)
     while not bot.is_closed():
-        if core.last_prank_date == datetime.date.today():
-            now = datetime.datetime.now()
-            tomorrow = datetime.datetime.combine(
-                now.date() + datetime.timedelta(days=1), datetime.time.min
-            )
-            wait_until_next_day = max(1, int((tomorrow - now).total_seconds()))
+        now = datetime.datetime.now()
+        _reset_prank_state_if_needed(now)
+        if core.pranks_played_today >= DAILY_PRANK_TARGET_COUNT:
+            wait_until_next_day = _seconds_until_next_day(now)
             logger.info(
-                "Daily prank limit reached, waiting %ss for next day.", wait_until_next_day
+                "Daily prank target reached (%s/%s), waiting %ss for next day.",
+                core.pranks_played_today,
+                DAILY_PRANK_TARGET_COUNT,
+                wait_until_next_day,
             )
             await asyncio.sleep(wait_until_next_day)
             continue
 
-        wait_time = random.randint(MIN_TIME, MAX_TIME)
-        logger.info("Prank loop sleeping for %ss before next attempt.", wait_time)
+        wait_time = _compute_prank_wait_seconds(now)
+        logger.info(
+            "Prank loop sleeping for %ss before next attempt. progress=%s/%s",
+            wait_time,
+            core.pranks_played_today,
+            DAILY_PRANK_TARGET_COUNT,
+        )
         await asyncio.sleep(wait_time)
 
         if not core.prank_enabled:
             logger.info("Prank attempt skipped because prank mode is disabled.")
             continue
-        if core.last_prank_date == datetime.date.today():
+
+        now = datetime.datetime.now()
+        _reset_prank_state_if_needed(now)
+        if core.pranks_played_today >= DAILY_PRANK_TARGET_COUNT:
             continue
 
         selection = select_prank_file()
@@ -126,26 +242,7 @@ async def prank_loop():
             logger.warning("Prank file does not exist: %s", file_path)
             continue
 
-        target_channel = None
-        target_guild = None
-        for guild in bot.guilds:
-            if guild.voice_client and guild.voice_client.is_playing():
-                logger.info(
-                    "Skipping guild %s(%s): existing voice_client is playing.",
-                    guild.name,
-                    guild.id,
-                )
-                continue
-            candidates = [
-                voice_channel
-                for voice_channel in guild.voice_channels
-                if any(not member.bot for member in voice_channel.members)
-            ]
-            if candidates:
-                target_channel = random.choice(candidates)
-                target_guild = guild
-                break
-
+        target_guild, target_channel = _pick_random_occupied_voice_channel()
         if not target_channel or not target_guild:
             logger.info("Prank attempt skipped: no eligible voice channel with human members.")
             continue
@@ -162,6 +259,7 @@ async def prank_loop():
         created = False
         voice_client = None
         lock = get_voice_operation_lock(target_guild.id)
+        connection_changed = False
         try:
             async with lock:
                 voice_client = target_guild.voice_client
@@ -188,6 +286,7 @@ async def prank_loop():
                             raise
                         raise normalized_exc from exc
                     created = True
+                    connection_changed = True
                     logger.info(
                         "Prank loop connected to voice channel: %s",
                         _voice_channel_name(target_channel),
@@ -199,9 +298,11 @@ async def prank_loop():
                         _voice_channel_name(target_channel),
                     )
                     await voice_client.move_to(target_channel)
+                    connection_changed = True
 
+            await settle_voice_connection(connection_changed)
             mixer = get_mixer(voice_client)
-            mixer.add_sfx(discord.FFmpegPCMAudio(file_path, options="-vn"))
+            mixer.add_sfx(build_sfx_source(file_path))
             while mixer.has_sfx():
                 await asyncio.sleep(1)
             prank_played = True
@@ -241,12 +342,22 @@ async def prank_loop():
                     logger.exception("Failed to disconnect prank voice client after error.")
 
         if prank_played:
-            core.last_prank_date = datetime.date.today()
-            save_last_prank_date(core.last_prank_date)
+            core.prank_state_date = datetime.date.today()
+            core.pranks_played_today = min(
+                DAILY_PRANK_TARGET_COUNT, core.pranks_played_today + 1
+            )
+            save_prank_state(core.prank_state_date, core.pranks_played_today)
+            logger.info(
+                "Prank progress saved. progress=%s/%s date=%s",
+                core.pranks_played_today,
+                DAILY_PRANK_TARGET_COUNT,
+                core.prank_state_date,
+            )
 
 
 @bot.event
 async def on_ready():
+    _mark_gateway_recovered("ready")
     logger.info(
         "Bot ready as %s(%s). guilds=%s",
         bot.user.name if bot.user else "unknown",
@@ -254,9 +365,14 @@ async def on_ready():
         len(bot.guilds),
     )
     if not getattr(bot, "prank_state_loaded", False):
-        core.last_prank_date = load_last_prank_date()
+        core.prank_state_date, core.pranks_played_today = load_prank_state()
         bot.prank_state_loaded = True
-        logger.info("Prank state loaded. last_prank_date=%s", core.last_prank_date)
+        logger.info(
+            "Prank state loaded. date=%s played=%s/%s",
+            core.prank_state_date,
+            core.pranks_played_today,
+            DAILY_PRANK_TARGET_COUNT,
+        )
     if not getattr(bot, "prank_task_started", False):
         bot.loop.create_task(prank_loop())
         bot.prank_task_started = True
@@ -289,10 +405,30 @@ async def on_connect():
 @bot.event
 async def on_disconnect():
     logger.warning("Discord gateway disconnected.")
+    if GATEWAY_RECOVERY_TIMEOUT_SECONDS <= 0:
+        return
+
+    disconnect_started_at = _get_gateway_disconnect_started_at()
+    if disconnect_started_at is None:
+        disconnect_started_at = time.monotonic()
+        bot.gateway_disconnect_started_at = disconnect_started_at
+
+    watchdog_task = getattr(bot, "gateway_disconnect_watchdog_task", None)
+    if watchdog_task and not watchdog_task.done():
+        return
+
+    bot.gateway_disconnect_watchdog_task = bot.loop.create_task(
+        _gateway_disconnect_watchdog(disconnect_started_at)
+    )
+    logger.warning(
+        "Gateway recovery watchdog armed. timeout=%ss",
+        GATEWAY_RECOVERY_TIMEOUT_SECONDS,
+    )
 
 
 @bot.event
 async def on_resumed():
+    _mark_gateway_recovered("session resume")
     logger.info("Discord gateway session resumed.")
 
 

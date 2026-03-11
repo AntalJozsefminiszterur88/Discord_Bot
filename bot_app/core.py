@@ -22,8 +22,11 @@ from spotipy.oauth2 import SpotifyClientCredentials
 from bot_app.logging_setup import get_logger, setup_logging
 
 # --- BEÁLLÍTÁSOK ---
-MIN_TIME = 1800  # Minimum 30 perc
-MAX_TIME = 7200  # Maximum 2 óra
+MIN_TIME = 1800  # Minimum 30 percet hagyjunk a napi prankek kozott, ha a nap hossza engedi
+DAILY_PRANK_TARGET_COUNT = 2
+VOICE_CONNECTION_SETTLE_SECONDS = 0.75
+SFX_LEAD_IN_MS = 350
+PCM_SILENCE_FRAME = b"\x00" * 3840
 # -------------------
 INTERNAL_API_PORT = 5050  # Port az internal API-hoz (Docker konténeren belül)
 TARGET_CHANNEL_ID: Optional[int] = 1370685414578327594
@@ -38,15 +41,37 @@ SCHEDULER_POLL_INTERVAL_SECONDS = 5
 # --- PRANK ÁLLAPOT ---
 prank_enabled = True
 prank_mode = "normal"  # normal | jimmy | mixed
-last_prank_date: Optional[datetime.date] = None
+prank_state_date: Optional[datetime.date] = None
+pranks_played_today = 0
 
 setup_logging()
 logger = get_logger(__name__)
 
 load_dotenv()
+
+
+def read_int_env(name: str, default: int, *, minimum: int = 0) -> int:
+    raw_value = os.getenv(name)
+    if raw_value is None:
+        return default
+    try:
+        return max(minimum, int(raw_value))
+    except ValueError:
+        logger.warning(
+            "Invalid integer environment variable %s=%r. Using default=%s.",
+            name,
+            raw_value,
+            default,
+        )
+        return default
+
+
 TOKEN = os.getenv("DISCORD_TOKEN")
 SPOTIPY_CLIENT_ID = os.getenv("SPOTIPY_CLIENT_ID")
 SPOTIPY_CLIENT_SECRET = os.getenv("SPOTIPY_CLIENT_SECRET")
+GATEWAY_RECOVERY_TIMEOUT_SECONDS = read_int_env(
+    "DISCORD_GATEWAY_RECOVERY_TIMEOUT_SECONDS", 300, minimum=0
+)
 
 sp = spotipy.Spotify(
     auth_manager=SpotifyClientCredentials(
@@ -106,6 +131,30 @@ def cleanup_audio_source(source: Optional[discord.AudioSource]) -> None:
         cleanup()
     except Exception as e:
         logger.warning("Audio source cleanup error: %s", e)
+
+
+class PrefixedSilenceAudioSource(discord.AudioSource):
+    def __init__(self, source: discord.AudioSource, *, lead_in_ms: int):
+        self.source = source
+        self.remaining_lead_frames = max(0, int(lead_in_ms / 20))
+
+    def read(self) -> bytes:
+        if self.remaining_lead_frames > 0:
+            self.remaining_lead_frames -= 1
+            return PCM_SILENCE_FRAME
+        return self.source.read()
+
+    def cleanup(self) -> None:
+        cleanup_audio_source(self.source)
+
+    def is_opus(self):
+        return False
+
+
+async def settle_voice_connection(connection_changed: bool) -> None:
+    if not connection_changed:
+        return
+    await asyncio.sleep(VOICE_CONNECTION_SETTLE_SECONDS)
 
 
 def build_ffmpeg_options(*, stream: bool, data: Optional[dict] = None) -> dict:
@@ -627,30 +676,48 @@ def select_prank_file():
     return os.path.join(folder, filename), filename
 
 
-def load_last_prank_date() -> Optional[datetime.date]:
+def load_prank_state() -> tuple[Optional[datetime.date], int]:
     if not os.path.exists(PRANK_STATE_FILE):
-        return None
+        return None, 0
 
     try:
         with open(PRANK_STATE_FILE, "r", encoding="utf-8") as state_file:
             data = json.load(state_file)
     except (OSError, json.JSONDecodeError):
-        return None
+        return None, 0
 
-    raw_date = data.get("last_prank_date")
+    raw_date = data.get("prank_date") or data.get("last_prank_date")
     if not raw_date:
-        return None
+        return None, 0
 
     try:
-        return datetime.date.fromisoformat(raw_date)
+        prank_date = datetime.date.fromisoformat(raw_date)
     except ValueError:
-        return None
+        return None, 0
+
+    raw_count = data.get("pranks_played")
+    if raw_count is None:
+        return prank_date, 1
+
+    try:
+        prank_count = int(raw_count)
+    except (TypeError, ValueError):
+        prank_count = 0
+
+    prank_count = max(0, min(DAILY_PRANK_TARGET_COUNT, prank_count))
+    return prank_date, prank_count
 
 
-def save_last_prank_date(value: datetime.date) -> None:
+def save_prank_state(value_date: Optional[datetime.date], prank_count: int) -> None:
+    payload = {
+        "prank_date": value_date.isoformat() if value_date else None,
+        "pranks_played": max(0, min(DAILY_PRANK_TARGET_COUNT, int(prank_count))),
+    }
+    if value_date:
+        payload["last_prank_date"] = value_date.isoformat()
     try:
         with open(PRANK_STATE_FILE, "w", encoding="utf-8") as state_file:
-            json.dump({"last_prank_date": value.isoformat()}, state_file)
+            json.dump(payload, state_file)
     except OSError as e:
         logger.warning("Failed to save prank state: %s", e)
 
@@ -718,7 +785,10 @@ def build_intro_source():
 
 
 def build_sfx_source(path: str):
-    return discord.FFmpegPCMAudio(path, options="-vn")
+    return PrefixedSilenceAudioSource(
+        discord.FFmpegPCMAudio(path, options="-vn"),
+        lead_in_ms=SFX_LEAD_IN_MS,
+    )
 
 
 async def punish_player(

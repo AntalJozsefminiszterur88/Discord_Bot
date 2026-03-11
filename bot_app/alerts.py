@@ -107,6 +107,7 @@ async def play_radnai_voice_alert(alert_sound_path: str, stop_event: asyncio.Eve
                 target_channel = voice_client.channel
 
             created = False
+            connection_changed = False
             async with lock:
                 if voice_client and not voice_client.is_connected():
                     logger.warning(
@@ -131,6 +132,7 @@ async def play_radnai_voice_alert(alert_sound_path: str, stop_event: asyncio.Eve
                             raise
                         raise normalized_exc from exc
                     created = True
+                    connection_changed = True
                     logger.info(
                         "Radnai alert connected to voice. guild=%s channel=%s",
                         guild.id,
@@ -144,9 +146,11 @@ async def play_radnai_voice_alert(alert_sound_path: str, stop_event: asyncio.Eve
                         target_channel.id,
                     )
                     await voice_client.move_to(target_channel)
+                    connection_changed = True
 
+            await settle_voice_connection(connection_changed)
             mixer = get_mixer(voice_client)
-            mixer.add_sfx(discord.FFmpegPCMAudio(alert_sound_path, options="-vn"))
+            mixer.add_sfx(build_sfx_source(alert_sound_path))
 
             while mixer.has_sfx() and not stop_event.is_set():
                 await asyncio.sleep(1)

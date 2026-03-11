@@ -1,4 +1,5 @@
-discord.py[voice]==2.6.4
+# Discord voice 4017 fix: use a build with DAVE voice support
+discord.py[voice] @ https://github.com/Rapptz/discord.py/archive/refs/heads/master.zip
 yt-dlp
 python-dotenv
 spotipy
