@@ -235,6 +235,10 @@ class MixingAudioSource(discord.AudioSource):
         if old_source and old_source is not source:
             cleanup_audio_source(old_source)
 
+    def has_main_source(self) -> bool:
+        with self._lock:
+            return self.main_source is not None
+
     def add_sfx(self, source: discord.AudioSource):
         with self._lock:
             self.sfx_sources.append(source)
@@ -242,6 +246,10 @@ class MixingAudioSource(discord.AudioSource):
     def has_sfx(self) -> bool:
         with self._lock:
             return bool(self.sfx_sources)
+
+    def has_active_audio(self) -> bool:
+        with self._lock:
+            return self.main_source is not None or bool(self.sfx_sources)
 
     def _mix(self, base: bytes, overlay: bytes) -> bytes:
         if not base:
@@ -737,6 +745,18 @@ def get_mixer(voice_client: discord.VoiceClient) -> MixingAudioSource:
         voice_client.stop()
     voice_client.play(mixer)
     return mixer
+
+
+def is_voice_client_busy(voice_client: Optional[discord.VoiceClient]) -> bool:
+    if not voice_client:
+        return False
+    if voice_client.is_paused():
+        return True
+
+    source = getattr(voice_client, "source", None)
+    if isinstance(source, MixingAudioSource):
+        return source.has_active_audio()
+    return voice_client.is_playing()
 
 
 async def play_next_in_queue(ctx):

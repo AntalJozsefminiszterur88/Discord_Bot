@@ -21,3 +21,11 @@ radnai_alert/*.wav
 radnai_alert/*.webm
 logs/*.log
 logs/*.log.*
+*.pyc
+bin/
+obj/
+*.user
+*.suo
+.vs/
+node_modules/
+dist/

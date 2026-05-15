@@ -1,6 +1,6 @@
 from bot_app.core import *
 from bot_app.alerts import start_internal_server
-from bot_app.scheduler_web import load_scheduled_messages, scheduled_message_dispatch_loop
+from bot_app.scheduler_web import load_scheduled_messages, scheduled_message_dispatch_loop, now_budapest, BUDAPEST_TZ
 import bot_app.core as core
 
 
@@ -24,22 +24,50 @@ def load_quotes() -> list[str]:
         return []
 
     quotes = []
-    expecting_quote = False
+    current_quote_lines = []
+    in_message = False
+
     with open(QUOTES_FILE_PATH, "r", encoding="utf-8") as quote_file:
         for raw_line in quote_file:
             line = raw_line.strip()
             if is_timestamp_line(line):
-                expecting_quote = True
+                if current_quote_lines:
+                    full_quote = "\n".join(current_quote_lines).strip()
+                    if full_quote:
+                        quotes.append(full_quote)
+                current_quote_lines = []
+                in_message = True
                 continue
-            if not expecting_quote:
+            
+            if not in_message:
                 continue
-            if not line or line in {"{Attachments}", "{Reactions}"}:
+
+            if not line:
+                if current_quote_lines:
+                    current_quote_lines.append("")
                 continue
-            if line.lower().startswith("http"):
+
+            if line in {"{Attachments}", "{Reactions}"} or line.lower().startswith("http"):
+                in_message = False
                 continue
-            quotes.append(line)
-            expecting_quote = False
-    return quotes
+
+            current_quote_lines.append(line)
+
+    if current_quote_lines:
+        full_quote = "\n".join(current_quote_lines).strip()
+        if full_quote:
+            quotes.append(full_quote)
+
+    # Filter/Truncate quotes to 10 lines max
+    processed_quotes = []
+    for q in quotes:
+        lines = q.split("\n")
+        if len(lines) > 10:
+            processed_quotes.append("\n".join(lines[:10]) + "\n...")
+        else:
+            processed_quotes.append(q)
+
+    return processed_quotes
 
 
 def pick_random_quote() -> Optional[str]:
@@ -126,8 +154,8 @@ async def daily_quote_task():
 @daily_quote_task.before_loop
 async def before_daily_quote_task():
     await bot.wait_until_ready()
-    now = datetime.datetime.now()
-    target = now.replace(hour=12, minute=0, second=0, microsecond=0)
+    now = now_budapest()
+    target = now.replace(hour=10, minute=0, second=0, microsecond=0)
     if now >= target:
         target += datetime.timedelta(days=1)
     wait_seconds = (target - now).total_seconds()
@@ -357,6 +385,11 @@ async def prank_loop():
 
 @bot.event
 async def on_ready():
+    from bot_app.mqtt_handler import start_mqtt
+    if not getattr(bot, '''mqtt_started''', False):
+        bot.loop.create_task(start_mqtt())
+        bot.mqtt_started = True
+        logger.info('''MQTT task started in Discord Bot''')
     _mark_gateway_recovered("ready")
     logger.info(
         "Bot ready as %s(%s). guilds=%s",

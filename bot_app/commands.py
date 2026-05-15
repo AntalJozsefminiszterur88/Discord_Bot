@@ -139,13 +139,13 @@ async def mondd(ctx, *, text: str):
     voice_client = ctx.voice_client
     channel = ctx.message.author.voice.channel
 
-    if voice_client and voice_client.is_playing():
+    if is_voice_client_busy(voice_client):
         await ctx.send("Várd meg, míg a jelenlegi lejátszás véget ér!")
         return
 
     voice_client = await ensure_voice_client(ctx, channel, settle=True)
 
-    tts_file = "tts_temp.mp3"
+    tts_file = os.path.join(BASE_DIR, f"tts_temp_{ctx.guild.id}_{ctx.message.id}.mp3")
     try:
         tts = gTTS(text=text, lang="hu")
         tts.save(tts_file)
@@ -153,8 +153,8 @@ async def mondd(ctx, *, text: str):
         mixer = get_mixer(voice_client)
         mixer.set_main_source(discord.FFmpegPCMAudio(tts_file, options="-vn"))
 
-        while mixer.main_source:
-            await asyncio.sleep(1)
+        while mixer.has_main_source():
+            await asyncio.sleep(0.2)
     finally:
         if os.path.exists(tts_file):
             os.remove(tts_file)
