@@ -147,6 +147,19 @@ class PrefixedSilenceAudioSource(discord.AudioSource):
     def cleanup(self) -> None:
         cleanup_audio_source(self.source)
 
+    def cleanup(self):
+        if self.is_cleaning_up:
+            return
+        self.is_cleaning_up = True
+        logger.debug("Cleaning up MixingAudioSource.")
+        with self._lock:
+            if self.main_source:
+                cleanup_audio_source(self.main_source)
+                self.main_source = None
+            for source in self.sfx_sources:
+                cleanup_audio_source(source)
+            self.sfx_sources.clear()
+
     def is_opus(self):
         return False
 
@@ -220,6 +233,7 @@ def normalize_voice_runtime_error(exc: Exception) -> Exception:
 
 class MixingAudioSource(discord.AudioSource):
     def __init__(self, main_source: Optional[discord.AudioSource] = None):
+        self.is_cleaning_up = False
         self.main_source = main_source
         self.sfx_sources = []
         self.sample_width = 2
@@ -299,7 +313,20 @@ class MixingAudioSource(discord.AudioSource):
 
         if mixed:
             return mixed
-        return b"\x00" * 3840
+        return b"" 
+
+    def cleanup(self):
+        if self.is_cleaning_up:
+            return
+        self.is_cleaning_up = True
+        logger.debug("Cleaning up MixingAudioSource.")
+        with self._lock:
+            if self.main_source:
+                cleanup_audio_source(self.main_source)
+                self.main_source = None
+            for source in self.sfx_sources:
+                cleanup_audio_source(source)
+            self.sfx_sources.clear()
 
     def is_opus(self):
         return False
