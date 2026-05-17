@@ -12,6 +12,7 @@ venv/
 
 # Local runtime data and media assets
 scheduled_messages.json
+factorio_access_list.json
 jimmy/
 music/
 sounds/

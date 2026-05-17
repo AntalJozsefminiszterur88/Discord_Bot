@@ -7,6 +7,7 @@ services:
     restart: unless-stopped
     env_file:
       - .env
+      - .env.factorio-control
     # --- EZT A 2 SORT KELL BEÍRNOD A VOLUMES FÖLÉ VAGY ALÁ ---
     networks:
       - umkgl-network
@@ -21,6 +22,7 @@ services:
       - ./quotes:/app/quotes
       - ./roulette_sounds:/app/roulette_sounds
       - ./scheduled_messages.json:/app/scheduled_messages.json
+      - ./factorio_access_list.json:/app/factorio_access_list.json
 
 # --- EZT PEDIG A FÁJL LEGZSÁRÁRA (NEM BELJEBB HÚZVA!) ---
 networks:

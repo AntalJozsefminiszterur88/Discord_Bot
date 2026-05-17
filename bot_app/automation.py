@@ -85,6 +85,43 @@ async def send_daily_quote(channel: discord.abc.Messageable) -> None:
     await channel.send(f'A nap mondása: "{quote}"')
 
 
+DAILY_QUOTE_TIME = datetime.time(hour=10, minute=0, tzinfo=BUDAPEST_TZ)
+
+
+async def _get_quotes_channel() -> Optional[discord.abc.Messageable]:
+    channel = bot.get_channel(QUOTES_CHANNEL_ID)
+    if channel is not None:
+        return channel
+
+    try:
+        return await bot.fetch_channel(QUOTES_CHANNEL_ID)
+    except discord.NotFound:
+        logger.warning("Quotes channel not found: %s", QUOTES_CHANNEL_ID)
+    except discord.Forbidden:
+        logger.warning("Missing permissions to access quotes channel: %s", QUOTES_CHANNEL_ID)
+    return None
+
+
+def _compute_next_daily_quote_run(
+    reference: Optional[datetime.datetime] = None,
+) -> datetime.datetime:
+    current_time = reference or now_budapest()
+    if current_time.tzinfo is None:
+        current_time = current_time.replace(tzinfo=BUDAPEST_TZ)
+    else:
+        current_time = current_time.astimezone(BUDAPEST_TZ)
+
+    target = current_time.replace(
+        hour=DAILY_QUOTE_TIME.hour,
+        minute=DAILY_QUOTE_TIME.minute,
+        second=0,
+        microsecond=0,
+    )
+    if current_time >= target:
+        target += datetime.timedelta(days=1)
+    return target
+
+
 def _cancel_gateway_disconnect_watchdog() -> None:
     watchdog_task = getattr(bot, "gateway_disconnect_watchdog_task", None)
     if watchdog_task and not watchdog_task.done():
@@ -135,36 +172,31 @@ async def _gateway_disconnect_watchdog(disconnect_started_at: float) -> None:
         logger.exception("Gateway disconnect watchdog failed.")
 
 
-@tasks.loop(hours=24)
+@tasks.loop(time=DAILY_QUOTE_TIME)
 async def daily_quote_task():
-    channel = bot.get_channel(QUOTES_CHANNEL_ID)
+    current_time = now_budapest()
+    channel = await _get_quotes_channel()
     if channel is None:
-        try:
-            channel = await bot.fetch_channel(QUOTES_CHANNEL_ID)
-        except discord.NotFound:
-            logger.warning("Quotes channel not found: %s", QUOTES_CHANNEL_ID)
-            return
-        except discord.Forbidden:
-            logger.warning("Missing permissions to access quotes channel: %s", QUOTES_CHANNEL_ID)
-            return
+        return
 
+    logger.info(
+        "Daily quote dispatch started. current_time=%s next_run=%s",
+        current_time.isoformat(timespec="seconds"),
+        _compute_next_daily_quote_run(current_time).isoformat(timespec="seconds"),
+    )
     await send_daily_quote(channel)
 
 
 @daily_quote_task.before_loop
 async def before_daily_quote_task():
     await bot.wait_until_ready()
-    now = now_budapest()
-    target = now.replace(hour=10, minute=0, second=0, microsecond=0)
-    if now >= target:
-        target += datetime.timedelta(days=1)
-    wait_seconds = (target - now).total_seconds()
+    next_run = _compute_next_daily_quote_run()
     logger.info(
-        "Next quote scheduled in %.0fs (target_epoch %.0f).",
-        wait_seconds,
-        target.timestamp(),
+        "Daily quote task armed. schedule=%s next_run=%s timezone=%s",
+        DAILY_QUOTE_TIME.isoformat(),
+        next_run.isoformat(timespec="seconds"),
+        getattr(BUDAPEST_TZ, "key", str(BUDAPEST_TZ)),
     )
-    await asyncio.sleep(wait_seconds)
 
 
 # --- BELSŐ API ---

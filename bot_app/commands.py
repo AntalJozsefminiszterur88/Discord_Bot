@@ -1,7 +1,20 @@
 from bot_app.core import *
 from bot_app.alerts import stop_radnai_alert
 from bot_app.automation import send_daily_quote
+from bot_app.factorio_control import (
+    add_factorio_access_member,
+    call_factorio_control_api,
+    factorio_api_configuration_error,
+    factorio_api_configured,
+    format_factorio_status_message,
+    is_factorio_user_authorized,
+    list_factorio_access_entries,
+    remove_factorio_access_member,
+)
 import bot_app.core as core
+
+
+FACTORIO_LIST_ADMIN_USER_ID = 284011534198374411
 
 
 def _voice_channel_name(channel: Optional[discord.VoiceChannel]) -> str:
@@ -59,6 +72,51 @@ async def ensure_voice_client(ctx, target_channel, *, settle: bool = False):
     return voice_client
 
 
+async def ensure_factorio_control_context(ctx) -> bool:
+    if ctx.guild is None:
+        await ctx.send("Ez a parancs csak szerveren belül használható.")
+        return False
+
+    if not factorio_api_configured():
+        await ctx.send(f"❌ {factorio_api_configuration_error()}")
+        return False
+
+    if not await is_factorio_user_authorized(ctx.author.id):
+        await ctx.send("❌ Nincs jogosultságod a Factorio szerver vezérléséhez.")
+        return False
+
+    return True
+
+
+async def ensure_factorio_list_admin(ctx) -> bool:
+    if ctx.guild is None:
+        await ctx.send("Ez a parancs csak szerveren belül használható.")
+        return False
+
+    if ctx.author.id != FACTORIO_LIST_ADMIN_USER_ID:
+        await ctx.send("❌ A Factorio jogosultsági listát csak a kijelölt tulajdonos kezelheti.")
+        return False
+
+    return True
+
+
+async def send_long_message(ctx, text: str, *, chunk_size: int = 1800) -> None:
+    remaining = str(text or "").strip()
+    if not remaining:
+        return
+
+    while remaining:
+        if len(remaining) <= chunk_size:
+            await ctx.send(remaining)
+            return
+
+        split_index = remaining.rfind("\n", 0, chunk_size)
+        if split_index <= 0:
+            split_index = chunk_size
+        await ctx.send(remaining[:split_index])
+        remaining = remaining[split_index:].lstrip()
+
+
 @bot.command(name="help")
 async def help_command(ctx):
     embed = discord.Embed(
@@ -102,6 +160,18 @@ async def help_command(ctx):
         inline=False,
     )
     embed.add_field(
+        name="🏭 Factorio",
+        value=(
+            "**!factorio on**: Factorio szerver indítása.\n"
+            "**!factorio off**: Factorio szerver leállítása.\n"
+            "**!factorio status**: Factorio szerver állapota.\n"
+            "**!factorio add @tag**: Jogosultság adása egy Discord tagnak (admin).\n"
+            "**!factorio remove @tag**: Jogosultság elvétele (admin).\n"
+            "**!factorio list**: Jogosultak listája (admin)."
+        ),
+        inline=False,
+    )
+    embed.add_field(
         name="🧹 Moderation",
         value=(
             "**!consuela**: Bot uzenetek torlese az elmult 5 percbol az aktualis "
@@ -110,6 +180,133 @@ async def help_command(ctx):
         inline=False,
     )
     await ctx.send(embed=embed)
+
+
+@bot.group(name="factorio", invoke_without_command=True)
+async def factorio_group(ctx):
+    await ctx.send(
+        "Használat: `!factorio on`, `!factorio off`, `!factorio status`, "
+        "`!factorio add @tag`, `!factorio remove @tag`, `!factorio list`"
+    )
+
+
+@factorio_group.command(name="status")
+async def factorio_status(ctx):
+    if not await ensure_factorio_control_context(ctx):
+        return
+
+    try:
+        payload = await call_factorio_control_api("status")
+    except Exception as exc:
+        logger.exception(
+            "Factorio status command failed. guild=%s user=%s",
+            ctx.guild.id if ctx.guild else "dm",
+            ctx.author.id if ctx.author else "unknown",
+        )
+        await ctx.send(f"❌ Nem sikerült lekérni a Factorio állapotát: {exc}")
+        return
+
+    await ctx.send(format_factorio_status_message(payload))
+
+
+@factorio_group.command(name="on")
+async def factorio_on(ctx):
+    if not await ensure_factorio_control_context(ctx):
+        return
+
+    try:
+        payload = await call_factorio_control_api("on")
+    except Exception as exc:
+        logger.exception(
+            "Factorio start command failed. guild=%s user=%s",
+            ctx.guild.id if ctx.guild else "dm",
+            ctx.author.id if ctx.author else "unknown",
+        )
+        await ctx.send(f"❌ Nem sikerült elindítani a Factorio szervert: {exc}")
+        return
+
+    await ctx.send(format_factorio_status_message(payload))
+
+
+@factorio_group.command(name="off")
+async def factorio_off(ctx):
+    if not await ensure_factorio_control_context(ctx):
+        return
+
+    try:
+        payload = await call_factorio_control_api("off")
+    except Exception as exc:
+        logger.exception(
+            "Factorio stop command failed. guild=%s user=%s",
+            ctx.guild.id if ctx.guild else "dm",
+            ctx.author.id if ctx.author else "unknown",
+        )
+        await ctx.send(f"❌ Nem sikerült leállítani a Factorio szervert: {exc}")
+        return
+
+    await ctx.send(format_factorio_status_message(payload))
+
+
+@factorio_group.command(name="add")
+async def factorio_add(ctx, member: discord.Member):
+    if not await ensure_factorio_list_admin(ctx):
+        return
+
+    changed, _ = await add_factorio_access_member(member, ctx.author)
+    if changed:
+        await ctx.send(f"✅ {member.mention} felkerült a Factorio jogosultsági listára.")
+        return
+
+    await ctx.send(f"ℹ️ {member.mention} már rajta volt a Factorio jogosultsági listán.")
+
+
+@factorio_group.command(name="remove")
+async def factorio_remove(ctx, member: discord.Member):
+    if not await ensure_factorio_list_admin(ctx):
+        return
+
+    removed_entry = await remove_factorio_access_member(member.id)
+    if removed_entry is None:
+        await ctx.send(f"ℹ️ {member.mention} nincs rajta a Factorio jogosultsági listán.")
+        return
+
+    await ctx.send(f"✅ {member.mention} lekerült a Factorio jogosultsági listáról.")
+
+
+@factorio_group.command(name="list")
+async def factorio_list(ctx):
+    if not await ensure_factorio_list_admin(ctx):
+        return
+
+    entries = await list_factorio_access_entries()
+    if not entries:
+        await ctx.send("A Factorio jogosultsági lista jelenleg üres.")
+        return
+
+    lines = ["**Factorio jogosultsági lista:**"]
+    for entry in entries:
+        user_id = int(entry.get("user_id"))
+        member = ctx.guild.get_member(user_id)
+        identity = member.mention if member else f"<@{user_id}>"
+        display_name = str(entry.get("display_name") or entry.get("tag") or user_id)
+        added_by = str(entry.get("added_by_tag") or entry.get("added_by_id") or "ismeretlen")
+        added_at = str(entry.get("added_at") or "ismeretlen")
+        lines.append(
+            f"- {identity} | név: `{display_name}` | hozzáadta: `{added_by}` | ekkor: `{added_at}`"
+        )
+
+    await send_long_message(ctx, "\n".join(lines))
+
+
+@factorio_group.error
+async def factorio_group_error(ctx, error):
+    if isinstance(error, commands.MissingRequiredArgument):
+        await ctx.send("Használat: `!factorio add @tag` vagy `!factorio remove @tag`")
+        return
+
+    if isinstance(error, commands.MemberNotFound):
+        await ctx.send("Nem találom a megadott Discord tagot. Említéssel használd a parancsot.")
+        return
 
 
 @bot.command(name="join")
