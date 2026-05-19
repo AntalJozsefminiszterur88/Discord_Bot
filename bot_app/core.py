@@ -147,19 +147,6 @@ class PrefixedSilenceAudioSource(discord.AudioSource):
     def cleanup(self) -> None:
         cleanup_audio_source(self.source)
 
-    def cleanup(self):
-        if self.is_cleaning_up:
-            return
-        self.is_cleaning_up = True
-        logger.debug("Cleaning up MixingAudioSource.")
-        with self._lock:
-            if self.main_source:
-                cleanup_audio_source(self.main_source)
-                self.main_source = None
-            for source in self.sfx_sources:
-                cleanup_audio_source(source)
-            self.sfx_sources.clear()
-
     def is_opus(self):
         return False
 
@@ -313,7 +300,7 @@ class MixingAudioSource(discord.AudioSource):
 
         if mixed:
             return mixed
-        return b"" 
+        return PCM_SILENCE_FRAME
 
     def cleanup(self):
         if self.is_cleaning_up:
@@ -875,5 +862,4 @@ async def punish_player(
 # --- MONDÁSOK ---
 QUOTES_FILE_PATH = "/app/quotes/mondasok.txt"
 QUOTE_TIMESTAMP_REGEX = re.compile(r"^\[\d{2}\.\d{2}\.\d{4} \d{2}:\d{2}\]")
-
 

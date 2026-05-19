@@ -24,6 +24,18 @@ services:
       - ./scheduled_messages.json:/app/scheduled_messages.json
       - ./factorio_access_list.json:/app/factorio_access_list.json
 
+  factorio-control-api:
+    build:
+      context: ./factorio-control-api
+    container_name: factorio-control-api
+    restart: unless-stopped
+    env_file:
+      - .env.factorio-control
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - umkgl-network
+
 # --- EZT PEDIG A FÁJL LEGZSÁRÁRA (NEM BELJEBB HÚZVA!) ---
 networks:
   umkgl-network:

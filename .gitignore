@@ -30,3 +30,4 @@ obj/
 .vs/
 node_modules/
 dist/
+factorio-control-api/factorio-control-api
